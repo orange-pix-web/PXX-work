@@ -365,6 +365,19 @@
         }
     }
 
+    async function invalidateDirectoryHandle(productId, reason, error) {
+        if (productId) {
+            delete state.directoryHandles[productId];
+            await saveDirectoryHandleToDb(productId, null, state.folderSnapshots[productId]?.folderName || '');
+        }
+        logEvent('error', '目录句柄已失效，请重新选择视频文件夹', {
+            productId,
+            reason,
+            error: error?.message || String(error || '')
+        });
+        renderConfigListV2();
+    }
+
     async function collectVideoFilesFromDirectoryHandle(handle, prefix = '') {
         const files = [];
         for await (const entry of handle.values()) {
@@ -488,7 +501,48 @@
                 });
             }
 
-            const handleFiles = dedupeResolvedFiles((await collectVideoFilesFromDirectoryHandle(handle)).filter(isValidResolvedVideoFile));
+            let handleFiles = [];
+            try {
+                handleFiles = dedupeResolvedFiles((await collectVideoFilesFromDirectoryHandle(handle)).filter(isValidResolvedVideoFile));
+            } catch (error) {
+                await invalidateDirectoryHandle(productId, 'fresh-scan-handle-error', error);
+                const fallbackFiles = dedupeResolvedFiles([
+                    ...(state.liveFiles[productId] || []),
+                    ...(state.persistedFiles[productId] || [])
+                ].filter(isValidResolvedVideoFile));
+                const folderName = fallbackFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || state.folderSnapshots[productId]?.folderName || '';
+                const totalSize = fallbackFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
+                logEvent('scan_debug', fallbackFiles.length ? '[SCAN] fresh scan fallback after handle error' : '[SCAN] fresh scan failed: handle error and no fallback files', {
+                    productId,
+                    batchId: options.batchId || '',
+                    forceFreshScan,
+                    handleValid: false,
+                    fallbackCount: fallbackFiles.length,
+                    totalSizeBytes: totalSize,
+                    error: error?.message || String(error || '')
+                });
+                logEvent('scan_debug', `[SCAN] fileCount=${fallbackFiles.length} size=${formatMb(totalSize)}MB`, {
+                    productId,
+                    batchId: options.batchId || '',
+                    fileCount: fallbackFiles.length,
+                    totalSizeBytes: totalSize
+                });
+                if (fallbackFiles.length) {
+                    return createResolvedFilePayload(fallbackFiles, 'fresh-handle-error-fallback', folderName, {
+                        handleValid: false,
+                        forceFreshScan: true
+                    });
+                }
+                const rebound = await triggerRebindFlow(productId, 'fresh-scan-handle-error');
+                if (rebound) {
+                    return getResolvedVideoFiles(productId, options);
+                }
+                return createResolvedFilePayload([], 'fresh-handle-error', folderName, {
+                    handleValid: false,
+                    forceFreshScan: true,
+                    error: error?.message || String(error || '')
+                });
+            }
             const folderName = handle.name || config.videoFolderPath || '';
             const snapshot = createSnapshotFromFiles(folderName, handleFiles.map(buildVideoMeta));
             state.persistedFiles[productId] = handleFiles;
@@ -556,7 +610,32 @@
         }
 
         if (handle) {
-            const handleFiles = await collectVideoFilesFromDirectoryHandle(handle);
+            let handleFiles = [];
+            try {
+                handleFiles = await collectVideoFilesFromDirectoryHandle(handle);
+            } catch (error) {
+                await invalidateDirectoryHandle(productId, 'handle-scan-error', error);
+                const fallbackFiles = dedupeResolvedFiles([
+                    ...(state.liveFiles[productId] || []),
+                    ...(state.persistedFiles[productId] || [])
+                ].filter(isValidResolvedVideoFile));
+                if (fallbackFiles.length) {
+                    const fallbackFolder = fallbackFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || state.folderSnapshots[productId]?.folderName || '';
+                    logEvent('scan_debug', '扫描调试', {
+                        productId,
+                        folderPath: fallbackFolder,
+                        rawFiles: fallbackFiles.length,
+                        filteredFiles: fallbackFiles.length,
+                        cacheHit: 'handle-error-fallback',
+                        handleValid: false,
+                        error: error?.message || String(error || '')
+                    });
+                    return createResolvedFilePayload(fallbackFiles, 'handle-error-fallback', fallbackFolder, {
+                        handleValid: false
+                    });
+                }
+                handleFiles = [];
+            }
             const folderName = handle.name || config.videoFolderPath || '';
             if (handleFiles.length) {
                 state.persistedFiles[productId] = handleFiles.filter(isValidResolvedVideoFile);
@@ -709,7 +788,8 @@
 
     function getFolderConfigured(config, snapshot) {
         const folder = getDisplayFolderPath(config, snapshot);
-        return Boolean(folder && folder !== '浏览器未暴露完整路径');
+        const hasHandle = Boolean(state.directoryHandles[config?.productId]);
+        return Boolean(hasHandle && folder && folder !== '浏览器未暴露完整路径');
     }
 
     function createInput(id, placeholder) {
@@ -1651,6 +1731,7 @@
             const task = buildTask(effectiveConfig);
             const folderPath = getDisplayFolderPath(config, snapshot);
             const configured = getFolderConfigured(config, snapshot);
+            const statusText = configured ? '已配置' : (task.scannedVideoCount ? '需重新选择' : '未配置');
             const collapsed = state.cardCollapsedMap[config.productId] !== false;
 
             const card = document.createElement('div');
@@ -1678,7 +1759,7 @@
             title.textContent = `${index + 1}. 商品ID：${config.productId}`;
             const summary = document.createElement('div');
             summary.className = 'pcm-config-card__summary';
-            summary.textContent = `文件夹：${folderPath} | 视频：${task.scannedVideoCount} 个 | 当前批次：${task.videos.length}/${effectiveConfig.maxCount} | 状态：${configured ? '已配置' : '未配置'}`;
+            summary.textContent = `文件夹：${folderPath} | 视频：${task.scannedVideoCount} 个 | 当前批次：${task.videos.length}/${effectiveConfig.maxCount} | 状态：${statusText}`;
             info.appendChild(title);
             info.appendChild(summary);
             left.appendChild(info);
@@ -1705,7 +1786,7 @@
                 `<div><strong>商品ID：</strong>${config.productId || '未配置'}</div>`,
                 `<div><strong>视频文件夹路径：</strong>${folderPath}</div>`,
                 `<div><strong>视频总数：</strong>${task.scannedVideoCount} 个</div>`,
-                `<div><strong>配置状态：</strong>${configured ? '已配置' : '未配置'}</div>`,
+                `<div><strong>配置状态：</strong>${statusText}</div>`,
                 `<div><strong>当前批次：</strong>${task.videos.length}/${effectiveConfig.maxCount}</div>`,
                 `<div><strong>批次上限：</strong>${effectiveConfig.maxSize}${effectiveConfig.maxSizeUnit}</div>`
             ].join('');

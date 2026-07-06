@@ -701,11 +701,24 @@
                     productId,
                     force
                 });
-                const resolved = await window.PddModules?.productConfigManager?.getResolvedVideoFiles?.(productId, {
-                    config,
-                    forceFreshScan: force,
-                    batchId: options.batchId || batchLifecycle.batchId
-                });
+                let resolved = null;
+                try {
+                    resolved = await window.PddModules?.productConfigManager?.getResolvedVideoFiles?.(productId, {
+                        config,
+                        forceFreshScan: force,
+                        batchId: options.batchId || batchLifecycle.batchId
+                    });
+                } catch (error) {
+                    addLog(`[扫描] 目录读取失败：${error?.message || error}，请重新选择视频文件夹`, 'error');
+                    timerEnd('scan', 'scan');
+                    timerMark('scan_done');
+                    return {
+                        files: [],
+                        totalBytes: 0,
+                        sourceType: 'scan-error',
+                        error: error?.message || String(error || '')
+                    };
+                }
                 if (!resolved) {
                     addLog('[SCAN] fresh scan failed: no resolver result', 'error');
                     timerEnd('scan', 'fileScan');
