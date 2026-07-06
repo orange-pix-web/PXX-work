@@ -960,6 +960,20 @@
             };
         }
 
+        const workbenchResult = window.PddModules?.videoWorkbench?.lastRunResult;
+        if (!workbenchResult?.accepted) {
+            setStatusAndLog(`发布失败：${effectiveConfig.productId} ${workbenchResult?.reason || '工作台未确认完成'}`, 'error', {
+                productId: effectiveConfig.productId,
+                reason: workbenchResult?.reason || 'workbench-not-accepted'
+            });
+            return {
+                productId: effectiveConfig.productId,
+                status: 'fail',
+                isFatal: false,
+                reason: workbenchResult?.reason || 'workbench-not-accepted'
+            };
+        }
+
         setStatusAndLog(`发布成功：${effectiveConfig.productId}`, 'success', {
             productId: effectiveConfig.productId,
             selectedCount: task.videos.length,

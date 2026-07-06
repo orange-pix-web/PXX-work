@@ -876,7 +876,7 @@
                 };
                 await waitWithTimeout(() => {
                     const videoItems = Array.from(document.querySelectorAll('div[class*="video-list_singlePublish"]'));
-                    if (videoItems.length > 0) {
+                    if (videoItems.length >= expectedFilesCount) {
                         result = {
                             accepted: true,
                             matchedCount: videoItems.length,
@@ -1492,7 +1492,11 @@
                 if (!phaseLock.TITLE_BINDING_DONE) {
                     addLog(`[标题] 未完成 ${videoBindingState.title.done.size}/${currentBatchExpectedCount}`, 'error');
                     logLifecycleChecks(currentBatchExpectedCount, { nextBatchBlocked: true });
-                    return false;
+                    const recovered = await verifyFillIntegrity(currentBatchExpectedCount);
+                    if (!recovered) return false;
+                    syncBindingStateFromDom(currentBatchExpectedCount);
+                    phaseLock.TITLE_BINDING_DONE = videoBindingState.title.done.size === currentBatchExpectedCount;
+                    if (!phaseLock.TITLE_BINDING_DONE) return false;
                 }
                 transitionBatchState('TITLE_BINDING_DONE', {
                     count: videoBindingState.title.done.size
@@ -1508,7 +1512,11 @@
                 if (!phaseLock.ID_BINDING_DONE) {
                     addLog(`[商品ID] 未完成 ${videoBindingState.id.done.size}/${currentBatchExpectedCount}`, 'error');
                     logLifecycleChecks(currentBatchExpectedCount, { nextBatchBlocked: true });
-                    return false;
+                    const recovered = await verifyFillIntegrity(currentBatchExpectedCount);
+                    if (!recovered) return false;
+                    syncBindingStateFromDom(currentBatchExpectedCount);
+                    phaseLock.ID_BINDING_DONE = videoBindingState.id.done.size === currentBatchExpectedCount;
+                    if (!phaseLock.ID_BINDING_DONE) return false;
                 }
                 transitionBatchState('ID_BINDING_DONE', {
                     count: videoBindingState.id.done.size
@@ -1524,7 +1532,11 @@
                 if (!phaseLock.STATEMENT_DONE) {
                     addLog(`[声明] 未完成 ${videoBindingState.statement.done.size}/${currentBatchExpectedCount}`, 'error');
                     logLifecycleChecks(currentBatchExpectedCount, { nextBatchBlocked: true });
-                    return false;
+                    const recovered = await verifyFillIntegrity(currentBatchExpectedCount);
+                    if (!recovered) return false;
+                    syncBindingStateFromDom(currentBatchExpectedCount);
+                    phaseLock.STATEMENT_DONE = videoBindingState.statement.done.size === currentBatchExpectedCount;
+                    if (!phaseLock.STATEMENT_DONE) return false;
                 }
                 transitionBatchState('STATEMENT_DONE', {
                     count: videoBindingState.statement.done.size
@@ -1621,6 +1633,7 @@
                         if (i === 0) {
                             return {
                                 accepted: false,
+                                reason: 'no-files',
                                 totalBatches: 0,
                                 uploadedBatches: 0,
                                 maxCount,
@@ -1666,6 +1679,7 @@
                     if (!accepted) {
                         return {
                             accepted: false,
+                            reason: 'upload-not-accepted',
                             failedBatchIndex: i,
                             totalBatches,
                             uploadedBatches: i,
@@ -1679,6 +1693,7 @@
                     if (!fillReady) {
                         return {
                             accepted: false,
+                            reason: 'fill-incomplete',
                             failedBatchIndex: i,
                             totalBatches,
                             uploadedBatches: i,
@@ -1690,6 +1705,7 @@
                     if (!publishReady) {
                         return {
                             accepted: false,
+                            reason: 'publish-incomplete',
                             failedBatchIndex: i,
                             totalBatches,
                             uploadedBatches: i,
@@ -1701,6 +1717,7 @@
                     if (!batchDone) {
                         return {
                             accepted: false,
+                            reason: 'batch-not-done',
                             failedBatchIndex: i,
                             totalBatches,
                             uploadedBatches: i,
@@ -1714,6 +1731,7 @@
                     if (!navigationResult?.sidebar_home || !navigationResult?.sidebar_publish) {
                         return {
                             accepted: false,
+                            reason: 'navigation-failed',
                             failedBatchIndex: i,
                             totalBatches,
                             uploadedBatches: i + 1,
@@ -1747,7 +1765,11 @@
                 const productId = document.getElementById('pub-id')?.value.trim();
                 if (!productId) {
                     addLog('上传注入跳过：当前未填写商品 ID', 'error');
-                    return false;
+                    return {
+                        accepted: false,
+                        reason: 'missing-product-id',
+                        handledWorkflow: true
+                    };
                 }
 
                 const allowRebindRetry = options.allowRebindRetry !== false;
@@ -1761,7 +1783,11 @@
                 const config = loadProductConfig(productId);
                 if (!config) {
                     addLog(`上传注入失败：未找到商品 ${productId} 的配置`, 'error');
-                    return false;
+                    return {
+                        accepted: false,
+                        reason: 'missing-product-config',
+                        handledWorkflow: true
+                    };
                 }
 
                 addLog(`上传注入启动：商品 ${productId}，即将立即扫描目录`, 'info');
@@ -1771,12 +1797,15 @@
                     maxCount: config?.maxCount,
                     maxSize: config?.maxSize
                 });
-                if (!uploadResult.accepted && allowRebindRetry) {
+                const canRebind = uploadResult?.reason === 'upload-not-accepted' || uploadResult?.reason === 'no-files';
+                if (!uploadResult.accepted && allowRebindRetry && canRebind) {
                     const rebound = await triggerManualRebind(productId, 'upload-rejected');
                     if (rebound) {
                         uploadAttemptState.delete(lockKey);
                         return uploadInjectionStep({ allowRebindRetry: false, force: true });
                     }
+                } else if (!uploadResult.accepted) {
+                    addLog(`[流程] ${uploadResult?.reason || 'unknown'}，禁止触发二次选择目录`, 'error');
                 }
 
                 return uploadResult;
@@ -3158,9 +3187,11 @@
                 }
 
                 let flowSucceeded = false;
+                let uploadPhaseResult = null;
+                moduleApi.lastRunResult = null;
                 try {
                     uploadAttemptState.delete(id);
-                    const uploadPhaseResult = await uploadInjectionStep();
+                    uploadPhaseResult = await uploadInjectionStep();
                     flowSucceeded = Boolean(uploadPhaseResult?.accepted);
 
                     if (!uploadPhaseResult?.handledWorkflow) {
@@ -3168,8 +3199,19 @@
                     }
                 } catch (error) {
                     console.error('VIDEO_WORKBENCH_FLOW_ERROR', error);
+                    uploadPhaseResult = {
+                        accepted: false,
+                        reason: error?.message || String(error),
+                        handledWorkflow: true
+                    };
                     addLog(`[流程] 执行失败：${error?.message || error}`, 'error');
                 } finally {
+                    moduleApi.lastRunResult = {
+                        accepted: flowSucceeded,
+                        reason: uploadPhaseResult?.reason || (flowSucceeded ? 'completed' : 'unknown-failure'),
+                        handledWorkflow: Boolean(uploadPhaseResult?.handledWorkflow),
+                        at: Date.now()
+                    };
                     isRunning = false;
                     isPaused = false;
                     START_LOCK = false;
