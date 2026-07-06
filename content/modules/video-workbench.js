@@ -55,9 +55,21 @@
                 state: 'INIT',
                 uploadCompleted: false,
                 coverCompleted: false,
+                consistencyPassed: false,
                 publishedCount: 0,
                 expectedCount: 0,
                 processedFileKeys: new Set()
+            };
+            const videoBindingState = {
+                title: { done: new Set() },
+                id: { done: new Set() },
+                statement: { done: new Set() },
+                statementClickLock: new Set()
+            };
+            const phaseLock = {
+                TITLE_BINDING_DONE: false,
+                ID_BINDING_DONE: false,
+                STATEMENT_DONE: false
             };
 
             const getCfg = (id, defaultVal) => {
@@ -123,8 +135,10 @@
                 batchLifecycle.state = 'INIT';
                 batchLifecycle.uploadCompleted = false;
                 batchLifecycle.coverCompleted = false;
+                batchLifecycle.consistencyPassed = false;
                 batchLifecycle.publishedCount = 0;
                 batchLifecycle.expectedCount = expectedCount;
+                resetVideoBindingState();
             }
 
             function assertBatchState(expectedState) {
@@ -135,6 +149,38 @@
                         batchId: batchLifecycle.batchId
                     });
                     throw new Error(`BATCH_STATE_ASSERT_FAILED:${expectedState}`);
+                }
+            }
+
+            function resetVideoBindingState() {
+                videoBindingState.title.done = new Set();
+                videoBindingState.id.done = new Set();
+                videoBindingState.statement.done = new Set();
+                videoBindingState.statementClickLock = new Set();
+                phaseLock.TITLE_BINDING_DONE = false;
+                phaseLock.ID_BINDING_DONE = false;
+                phaseLock.STATEMENT_DONE = false;
+            }
+
+            function markAllBindingDone(type, count) {
+                const target = videoBindingState[type]?.done;
+                if (!target) return;
+                for (let i = 0; i < count; i++) target.add(i);
+            }
+
+            function getMissingIndexes(type, expectedCount) {
+                const done = videoBindingState[type]?.done || new Set();
+                const missing = [];
+                for (let i = 0; i < expectedCount; i++) {
+                    if (!done.has(i)) missing.push(i);
+                }
+                return missing;
+            }
+
+            function assertPhaseLock(lockName) {
+                if (!phaseLock[lockName]) {
+                    console.log('PHASE_LOCK_BLOCKED', lockName);
+                    throw new Error(`PHASE_LOCK_BLOCKED:${lockName}`);
                 }
             }
 
@@ -853,18 +899,22 @@
             function collectTitleTargets() {
                 const selectors = ['.ace-line', '[contenteditable="true"]', '.public-DraftEditor-content'];
                 const found = [];
-                selectors.forEach((selector) => {
-                    document.querySelectorAll(selector).forEach((node) => {
-                        if (node.id !== 'pub-title' && node.offsetHeight > 0 && !node.closest?.(`#${ROOT_ID}`)) {
-                            found.push(node);
-                        }
+                const roots = [document, ...collectShadowRoots(document)];
+                roots.forEach((root) => {
+                    selectors.forEach((selector) => {
+                        root.querySelectorAll(selector).forEach((node) => {
+                            if (node.id !== 'pub-title' && node.offsetHeight > 0 && !node.closest?.(`#${ROOT_ID}`)) {
+                                found.push(node);
+                            }
+                        });
                     });
                 });
                 return found.filter((target, index, self) => !self.slice(0, index).some((item) => Math.abs(item.getBoundingClientRect().top - target.getBoundingClientRect().top) < 30));
             }
 
             function collectDeclarationTargets() {
-                const rawContainers = Array.from(document.querySelectorAll('div')).filter((el) => {
+                const roots = [document, ...collectShadowRoots(document)];
+                const rawContainers = roots.flatMap((root) => Array.from(root.querySelectorAll('div'))).filter((el) => {
                     const text = el.innerText || '';
                     return text.includes('内容声明') && el.offsetHeight > 20 && el.offsetHeight < 120 && !el.closest?.(`#${ROOT_ID}`);
                 });
@@ -1228,17 +1278,49 @@
                 }
                 assertBatchState('UPLOAD_COMPLETED');
                 assertPhase('FILL_PHASE');
-                if (document.getElementById('task-chk-title').checked) await taskPubFillTitle();
+                if (document.getElementById('task-chk-title').checked) {
+                    await taskPubFillTitle({ missingIndexes: buildBindingDiff(currentBatchExpectedCount).missingTitle });
+                } else {
+                    markAllBindingDone('title', currentBatchExpectedCount);
+                }
+                syncBindingStateFromDom(currentBatchExpectedCount);
+                phaseLock.TITLE_BINDING_DONE = videoBindingState.title.done.size === currentBatchExpectedCount;
+                if (!phaseLock.TITLE_BINDING_DONE) {
+                    addLog(`[TITLE] incomplete ${videoBindingState.title.done.size}/${currentBatchExpectedCount}`, 'error');
+                    return false;
+                }
                 transitionBatchState('TITLE_BINDING_DONE', {
-                    count: getBindingCounts(currentBatchExpectedCount).titleCount
+                    count: videoBindingState.title.done.size
                 });
-                if (document.getElementById('task-chk-id').checked) await taskPubFillID();
+                assertPhaseLock('TITLE_BINDING_DONE');
+                if (document.getElementById('task-chk-id').checked) {
+                    await taskPubFillID({ missingIndexes: buildBindingDiff(currentBatchExpectedCount).missingID });
+                } else {
+                    markAllBindingDone('id', currentBatchExpectedCount);
+                }
+                syncBindingStateFromDom(currentBatchExpectedCount);
+                phaseLock.ID_BINDING_DONE = videoBindingState.id.done.size === currentBatchExpectedCount;
+                if (!phaseLock.ID_BINDING_DONE) {
+                    addLog(`[ID] incomplete ${videoBindingState.id.done.size}/${currentBatchExpectedCount}`, 'error');
+                    return false;
+                }
                 transitionBatchState('ID_BINDING_DONE', {
-                    count: getBindingCounts(currentBatchExpectedCount).idCount
+                    count: videoBindingState.id.done.size
                 });
-                if (document.getElementById('task-chk-declare').checked) await taskPubDeclare();
+                assertPhaseLock('ID_BINDING_DONE');
+                if (document.getElementById('task-chk-declare').checked) {
+                    await taskPubDeclare({ missingIndexes: buildBindingDiff(currentBatchExpectedCount).missingStatement });
+                } else {
+                    markAllBindingDone('statement', currentBatchExpectedCount);
+                }
+                syncBindingStateFromDom(currentBatchExpectedCount);
+                phaseLock.STATEMENT_DONE = videoBindingState.statement.done.size === currentBatchExpectedCount;
+                if (!phaseLock.STATEMENT_DONE) {
+                    addLog(`[STATEMENT] incomplete ${videoBindingState.statement.done.size}/${currentBatchExpectedCount}`, 'error');
+                    return false;
+                }
                 transitionBatchState('STATEMENT_DONE', {
-                    count: getBindingCounts(currentBatchExpectedCount).statementCount
+                    count: videoBindingState.statement.done.size
                 });
                 const fillVerified = await verifyFillIntegrity(currentBatchExpectedCount);
                 if (!fillVerified) {
@@ -1256,6 +1338,17 @@
                 }
                 if (!canProceedToPublish()) {
                     console.log('PUBLISH_BLOCKED_UPLOAD_IN_PROGRESS');
+                    return false;
+                }
+                if (!batchLifecycle.uploadCompleted || !batchLifecycle.consistencyPassed) {
+                    console.log('POST_BLOCKED_UPLOAD_OR_CONSISTENCY', {
+                        uploadCompleted: batchLifecycle.uploadCompleted,
+                        consistencyPassed: batchLifecycle.consistencyPassed
+                    });
+                    return false;
+                }
+                if (!phaseLock.TITLE_BINDING_DONE || !phaseLock.ID_BINDING_DONE || !phaseLock.STATEMENT_DONE) {
+                    console.log('POST_BLOCKED_PHASE_LOCK', { ...phaseLock });
                     return false;
                 }
                 await waitForPageStableAfterUpload(currentBatchExpectedCount, 30000, 300, 1200);
@@ -1997,16 +2090,29 @@
                 });
             }
 
-            async function taskPubFillID() {
+            async function taskPubFillID(options = {}) {
                 if (!document.getElementById('task-chk-id').checked) return;
                 const id = document.getElementById('pub-id').value.trim();
                 if (!id) return addLog('未输入商品 ID，跳过 ID 填充', 'error');
+                const requestedIndexes = Array.isArray(options.missingIndexes)
+                    ? options.missingIndexes
+                    : getMissingIndexes('id', currentBatchExpectedCount);
+                const missingIndexes = requestedIndexes.filter((index) => !videoBindingState.id.done.has(index));
+                if (!missingIndexes.length) {
+                    addLog('[ID] skip: all videos already bound', 'info');
+                    return;
+                }
                 const btns = getUniqueElements('添加商品');
-                addLog(`开始填 ID：识别到 ${btns.length} 处`, 'info');
-                for (let i = 0; i < btns.length; i++) {
+                addLog(`[ID] selective fill: missing=${missingIndexes.length}, buttons=${btns.length}`, 'info');
+                for (let i = 0; i < Math.min(btns.length, missingIndexes.length); i++) {
                     if (!isRunning) return;
                     await checkPause();
-                    updateStatus(`[ID] ${i + 1}/${btns.length}`);
+                    const videoIndex = missingIndexes[i];
+                    if (videoBindingState.id.done.has(videoIndex)) {
+                        addLog(`[ID] skip video ${videoIndex + 1}: already bound`, 'info');
+                        continue;
+                    }
+                    updateStatus(`[ID] ${i + 1}/${missingIndexes.length}`);
                     robustClick(btns[i]);
                     await sleep(getCfg('cfg-id-wait', 1500));
                     const tab = Array.from(document.querySelectorAll('*')).find((el) => el.innerText === '商品ID' && el.offsetHeight > 0);
@@ -2023,31 +2129,41 @@
                             if (next) {
                                 robustClick(next);
                                 await sleep(1200);
-                                addLog(`ID 填入成功：视频 ${i + 1}`, 'success');
+                                videoBindingState.id.done.add(videoIndex);
+                                addLog(`ID 填入成功：视频 ${videoIndex + 1}`, 'success');
                             }
                         }
                     }
                 }
             }
 
-            async function taskPubFillTitle() {
+            async function taskPubFillTitle(options = {}) {
                 if (!document.getElementById('task-chk-title').checked) return;
                 const title = document.getElementById('pub-title').value;
                 if (!title) return addLog('未输入标题内容，跳过标题录入', 'error');
-                const selectors = ['.ace-line', '[contenteditable="true"]', '.public-DraftEditor-content'];
-                const found = [];
-                selectors.forEach((selector) => {
-                    document.querySelectorAll(selector).forEach((node) => {
-                        if (node.id !== 'pub-title' && node.offsetHeight > 0) found.push(node);
-                    });
-                });
-                const unique = found.filter((target, index, self) => !self.slice(0, index).some((item) => Math.abs(item.getBoundingClientRect().top - target.getBoundingClientRect().top) < 30));
-                addLog(`开始填标题：识别到 ${unique.length} 处`, 'info');
-                for (let i = 0; i < unique.length; i++) {
+                const requestedIndexes = Array.isArray(options.missingIndexes)
+                    ? options.missingIndexes
+                    : getMissingIndexes('title', currentBatchExpectedCount);
+                const missingIndexes = requestedIndexes.filter((index) => !videoBindingState.title.done.has(index));
+                if (!missingIndexes.length) {
+                    addLog('[TITLE] skip: all videos already filled', 'info');
+                    return;
+                }
+                const unique = collectTitleTargets();
+                addLog(`[TITLE] selective fill: missing=${missingIndexes.length}, targets=${unique.length}`, 'info');
+                for (const videoIndex of missingIndexes) {
                     if (!isRunning) return;
                     await checkPause();
-                    updateStatus(`[标题] ${i + 1}/${unique.length}`);
-                    const el = unique[i];
+                    if (videoBindingState.title.done.has(videoIndex)) {
+                        addLog(`[TITLE] skip video ${videoIndex + 1}: already filled`, 'info');
+                        continue;
+                    }
+                    updateStatus(`[标题] ${videoIndex + 1}/${currentBatchExpectedCount}`);
+                    const el = unique[videoIndex];
+                    if (!el) {
+                        addLog(`[TITLE] video ${videoIndex + 1} target missing`, 'error');
+                        continue;
+                    }
                     el.scrollIntoView({ block: 'center' });
                     el.focus();
                     await sleep(200);
@@ -2061,53 +2177,67 @@
                     ['input', 'change', 'blur', 'keyup'].forEach((eventName) => {
                         el.dispatchEvent(new Event(eventName, { bubbles: true }));
                     });
+                    videoBindingState.title.done.add(videoIndex);
+                    addLog(`[TITLE] filled video ${videoIndex + 1}/${currentBatchExpectedCount}`, 'success');
                     await sleep(getCfg('cfg-title-sleep', 800));
                 }
             }
 
-            async function taskPubDeclare() {
+            async function taskPubDeclare(options = {}) {
                 if (!document.getElementById('task-chk-declare').checked) return;
                 const targetText = document.getElementById('cfg-declare-type')?.value || '内容无需标注';
                 const declareWait = getCfg('cfg-declare-wait', 600);
-
-                const rawContainers = Array.from(document.querySelectorAll('div')).filter((el) => {
-                    const text = el.innerText || '';
-                    return text.includes('内容声明') && el.offsetHeight > 20 && el.offsetHeight < 120 && !el.closest(`#${ROOT_ID}`);
-                });
-                const allFormItems = [];
-                rawContainers.forEach((el) => {
-                    const rect = el.getBoundingClientRect();
-                    if (!allFormItems.some((item) => Math.abs(item.getBoundingClientRect().top - rect.top) < 30)) {
-                        allFormItems.push(el);
-                    }
-                });
+                const requestedIndexes = Array.isArray(options.missingIndexes)
+                    ? options.missingIndexes
+                    : getMissingIndexes('statement', currentBatchExpectedCount);
+                const missingIndexes = requestedIndexes.filter((index) => !videoBindingState.statement.done.has(index));
+                if (!missingIndexes.length) {
+                    addLog('[STATEMENT] skip: all videos already selected', 'info');
+                    return;
+                }
+                const allFormItems = collectDeclarationTargets();
 
                 if (allFormItems.length === 0) {
                     addLog('未找到“内容声明”区域，请检查页面是否加载完成', 'error');
                     return;
                 }
 
-                addLog(`开始内容声明：识别到 ${allFormItems.length} 个窗口`, 'info');
+                addLog(`[STATEMENT] selective fill: missing=${missingIndexes.length}, targets=${allFormItems.length}`, 'info');
 
-                for (let i = 0; i < allFormItems.length; i++) {
+                for (const videoIndex of missingIndexes) {
                     if (!isRunning) return;
                     await checkPause();
-                    updateStatus(`[声明] 处理中 ${i + 1}/${allFormItems.length}`);
-                    const container = allFormItems[i];
+                    if (videoBindingState.statement.done.has(videoIndex)) {
+                        addLog(`[STATEMENT] skip video ${videoIndex + 1}: already selected`, 'info');
+                        continue;
+                    }
+                    if (videoBindingState.statementClickLock.has(videoIndex)) {
+                        addLog(`[STATEMENT] skip video ${videoIndex + 1}: click locked`, 'info');
+                        continue;
+                    }
+                    updateStatus(`[声明] 处理中 ${videoIndex + 1}/${currentBatchExpectedCount}`);
+                    const container = allFormItems[videoIndex];
+                    if (!container) {
+                        addLog(`[STATEMENT] video ${videoIndex + 1} target missing`, 'error');
+                        continue;
+                    }
 
                     const trigger = container.querySelector('[data-testid*="select"]') || container.querySelector('[class*="input"]');
                     if (!trigger) {
-                        addLog(`视频 ${i + 1} 未找到声明触发器`, 'error');
+                        addLog(`视频 ${videoIndex + 1} 未找到声明触发器`, 'error');
                         continue;
                     }
+                    videoBindingState.statementClickLock.add(videoIndex);
                     container.scrollIntoView({ behavior: 'smooth', block: 'center' });
                     await sleep(500);
                     const selected = await retrySelectDropdown(trigger, targetText);
 
                     if (selected) {
-                        addLog(`视频 ${i + 1} 声明设置成功：${targetText}`, 'success');
+                        videoBindingState.statement.done.add(videoIndex);
+                        addLog(`视频 ${videoIndex + 1} 声明设置成功：${targetText}`, 'success');
                     } else {
-                        addLog(`视频 ${i + 1} 未找到选项“${targetText}”，可能浮层未弹出或文本不匹配`, 'error');
+                        videoBindingState.statementClickLock.delete(videoIndex);
+                        addLog(`视频 ${videoIndex + 1} 未找到选项“${targetText}”，可能浮层未弹出或文本不匹配`, 'error');
                         document.body.click();
                     }
                     await sleep(declareWait);
@@ -2149,41 +2279,145 @@
             }
 
             async function reRunMissingFill() {
-                if (document.getElementById('task-chk-title').checked) await taskPubFillTitle();
-                if (document.getElementById('task-chk-id').checked) await taskPubFillID();
-                if (document.getElementById('task-chk-declare').checked) await taskPubDeclare();
+                const diff = buildBindingDiff(currentBatchExpectedCount);
+                addLog(`[BACKTRACK] diff-only title=${diff.missingTitle.length} id=${diff.missingID.length} statement=${diff.missingStatement.length}`, 'info');
+                if (document.getElementById('task-chk-title').checked) await taskPubFillTitle({ missingIndexes: diff.missingTitle });
+                if (document.getElementById('task-chk-id').checked) await taskPubFillID({ missingIndexes: diff.missingID });
+                if (document.getElementById('task-chk-declare').checked) await taskPubDeclare({ missingIndexes: diff.missingStatement });
+            }
+
+            function getNodeTextAndValue(node) {
+                if (!node) return '';
+                const values = [
+                    node.value,
+                    node.innerText,
+                    node.textContent,
+                    node.getAttribute?.('value'),
+                    node.getAttribute?.('aria-label')
+                ];
+                node.querySelectorAll?.('input, textarea, [contenteditable="true"], .ace-line, .public-DraftEditor-content').forEach((child) => {
+                    values.push(child.value, child.innerText, child.textContent, child.getAttribute?.('value'), child.getAttribute?.('aria-label'));
+                });
+                return values.filter(Boolean).join('\n');
+            }
+
+            function markFirstDone(type, count, expectedCount) {
+                const done = videoBindingState[type]?.done;
+                if (!done) return;
+                const limit = Math.min(count, expectedCount);
+                for (let i = 0; i < limit; i++) {
+                    done.add(i);
+                }
+            }
+
+            function getTitleDetection(expectedCount) {
+                const titleValue = document.getElementById('pub-title')?.value || '';
+                const titleTargets = collectTitleTargets();
+                if (!titleValue) {
+                    return {
+                        domCount: 0,
+                        valueCount: 0,
+                        stateCount: videoBindingState.title.done.size,
+                        finalTitleCount: videoBindingState.title.done.size
+                    };
+                }
+
+                let domCount = 0;
+                let valueCount = 0;
+                titleTargets.forEach((target, index) => {
+                    const visualText = [target.innerText, target.textContent].filter(Boolean).join('\n');
+                    const stateText = getNodeTextAndValue(target);
+                    if (visualText.includes(titleValue)) {
+                        domCount += 1;
+                        videoBindingState.title.done.add(index);
+                    }
+                    if (stateText.includes(titleValue)) {
+                        valueCount += 1;
+                        videoBindingState.title.done.add(index);
+                    }
+                });
+
+                const finalTitleCount = Math.min(expectedCount, Math.max(domCount, valueCount, videoBindingState.title.done.size));
+                markFirstDone('title', finalTitleCount, expectedCount);
+                return {
+                    domCount,
+                    valueCount,
+                    stateCount: videoBindingState.title.done.size,
+                    finalTitleCount
+                };
+            }
+
+            function syncBindingStateFromDom(expectedCount) {
+                const titleEnabled = Boolean(document.getElementById('task-chk-title')?.checked);
+                const idEnabled = Boolean(document.getElementById('task-chk-id')?.checked);
+                const statementEnabled = Boolean(document.getElementById('task-chk-declare')?.checked);
+                const addProductRemaining = getUniqueElements('添加商品').length;
+                const selectedStatement = document.getElementById('cfg-declare-type')?.value || '内容无需标注';
+
+                if (!titleEnabled) {
+                    markAllBindingDone('title', expectedCount);
+                } else {
+                    getTitleDetection(expectedCount);
+                }
+
+                if (!idEnabled) {
+                    markAllBindingDone('id', expectedCount);
+                } else {
+                    markFirstDone('id', Math.max(0, expectedCount - addProductRemaining), expectedCount);
+                }
+
+                if (!statementEnabled) {
+                    markAllBindingDone('statement', expectedCount);
+                } else {
+                    collectDeclarationTargets().forEach((target, index) => {
+                        const text = getNodeTextAndValue(target);
+                        if (text.includes(selectedStatement) || /已选择|无需标注/.test(text)) {
+                            videoBindingState.statement.done.add(index);
+                        }
+                    });
+                }
+            }
+
+            function buildBindingDiff(expectedCount) {
+                syncBindingStateFromDom(expectedCount);
+                return {
+                    missingTitle: getMissingIndexes('title', expectedCount),
+                    missingID: getMissingIndexes('id', expectedCount),
+                    missingStatement: getMissingIndexes('statement', expectedCount)
+                };
             }
 
             function getBindingCounts(expectedCount) {
                 const titleEnabled = Boolean(document.getElementById('task-chk-title')?.checked);
                 const idEnabled = Boolean(document.getElementById('task-chk-id')?.checked);
                 const statementEnabled = Boolean(document.getElementById('task-chk-declare')?.checked);
-                const titleValue = document.getElementById('pub-title')?.value || '';
-                const addProductRemaining = getUniqueElements('添加商品').length;
+                syncBindingStateFromDom(expectedCount);
+                const titleDetection = getTitleDetection(expectedCount);
                 const titleCount = titleEnabled
-                    ? collectTitleTargets().filter((target) => (target.innerText || target.textContent || '').includes(titleValue)).length
+                    ? titleDetection.finalTitleCount
                     : expectedCount;
                 const idCount = idEnabled
-                    ? Math.max(0, expectedCount - addProductRemaining)
+                    ? videoBindingState.id.done.size
                     : expectedCount;
                 const statementCount = statementEnabled
-                    ? collectDeclarationTargets().filter((target) => {
-                        const text = target.innerText || target.textContent || '';
-                        return /内容无需标注|内容声明|已选择|无需标注/.test(text);
-                    }).length
+                    ? videoBindingState.statement.done.size
                     : expectedCount;
 
                 return {
                     videoCount: expectedCount,
                     titleCount,
                     idCount,
-                    statementCount
+                    statementCount,
+                    titleDomCount: titleDetection.domCount,
+                    titleValueCount: titleDetection.valueCount,
+                    titleStateCount: titleDetection.stateCount
                 };
             }
 
             async function verifyFillIntegrity(expectedCount) {
                 let counts = getBindingCounts(expectedCount);
                 let retryRound = 0;
+                let previousMissingCount = null;
 
                 while (
                     retryRound < 3 &&
@@ -2193,27 +2427,49 @@
                         counts.statementCount !== counts.videoCount
                     )
                 ) {
+                    const diff = buildBindingDiff(expectedCount);
+                    const missingCount = diff.missingTitle.length + diff.missingID.length + diff.missingStatement.length;
+                    if (retryRound > 0 && missingCount === previousMissingCount) {
+                        console.log('BACKTRACK_STUCK_DETECTED', {
+                            retryRound,
+                            missingCount,
+                            ...counts
+                        });
+                        addLog('[BACKTRACK] stuck detected -> switch to selective fix mode', 'error');
+                        break;
+                    }
+                    previousMissingCount = missingCount;
                     retryRound += 1;
                     console.log('BACKTRACK_FIX_TRIGGER', {
                         retryRound,
-                        ...counts
+                        ...counts,
+                        missingTitle: diff.missingTitle,
+                        missingID: diff.missingID,
+                        missingStatement: diff.missingStatement
                     });
                     addLog(`[BACKTRACK_FIX] retry=${retryRound} title=${counts.titleCount}/${counts.videoCount} id=${counts.idCount}/${counts.videoCount} statement=${counts.statementCount}/${counts.videoCount}`, 'error');
-                    getVisibleVideoItems();
-                    await reRunMissingFill();
+                    if (document.getElementById('task-chk-title').checked) await taskPubFillTitle({ missingIndexes: diff.missingTitle });
+                    if (document.getElementById('task-chk-id').checked) await taskPubFillID({ missingIndexes: diff.missingID });
+                    if (document.getElementById('task-chk-declare').checked) await taskPubDeclare({ missingIndexes: diff.missingStatement });
                     await sleep(1000);
                     counts = getBindingCounts(expectedCount);
                 }
 
                 const verified = counts.titleCount === counts.videoCount &&
                     counts.idCount === counts.videoCount &&
-                    counts.statementCount === counts.videoCount;
+                    counts.statementCount === counts.videoCount &&
+                    batchLifecycle.uploadCompleted === true;
+                batchLifecycle.consistencyPassed = verified;
+                phaseLock.TITLE_BINDING_DONE = videoBindingState.title.done.size === expectedCount;
+                phaseLock.ID_BINDING_DONE = videoBindingState.id.done.size === expectedCount;
+                phaseLock.STATEMENT_DONE = videoBindingState.statement.done.size === expectedCount;
 
                 console.log('FILL_CONSISTENCY_RESULT', {
                     verified,
                     ...counts
                 });
-                addLog(`[CONSISTENCY] title=${counts.titleCount}/${counts.videoCount} id=${counts.idCount}/${counts.videoCount} statement=${counts.statementCount}/${counts.videoCount}`, verified ? 'success' : 'error');
+                addLog(`[CONSISTENCY] title=${counts.titleCount}/${counts.videoCount} id=${counts.idCount}/${counts.videoCount} statement=${counts.statementCount}/${counts.videoCount} upload=${batchLifecycle.uploadCompleted}`, verified ? 'success' : 'error');
+                addLog(`[TITLE_VERIFY] dom=${counts.titleDomCount} value=${counts.titleValueCount} state=${counts.titleStateCount} final=${counts.titleCount}`, 'info');
                 return verified;
             }
 
