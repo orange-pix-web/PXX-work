@@ -462,16 +462,30 @@
 
         if (forceFreshScan) {
             if (!handle || !(await requestDirectoryPermission(handle))) {
-                const rebound = await triggerRebindFlow(productId, !handle ? 'missing-handle-fresh-scan' : 'permission-denied-fresh-scan');
-                if (rebound) {
-                    return getResolvedVideoFiles(productId, options);
-                }
-                logEvent('scan_debug', '[SCAN] fresh scan failed: folder handle unavailable', {
+                const fallbackFiles = dedupeResolvedFiles([
+                    ...(state.liveFiles[productId] || []),
+                    ...(state.persistedFiles[productId] || [])
+                ].filter(isValidResolvedVideoFile));
+                const folderName = fallbackFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || '';
+                const totalSize = fallbackFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
+                logEvent('scan_debug', fallbackFiles.length ? '[SCAN] fresh scan fallback once' : '[SCAN] fresh scan failed: folder handle unavailable', {
                     productId,
+                    batchId: options.batchId || '',
                     forceFreshScan,
-                    handleValid: false
+                    handleValid: false,
+                    fallbackCount: fallbackFiles.length,
+                    totalSizeBytes: totalSize
                 });
-                return createResolvedFilePayload([], 'fresh-scan-unavailable', config.videoFolderPath || '');
+                logEvent('scan_debug', `[SCAN] fileCount=${fallbackFiles.length} size=${formatMb(totalSize)}MB`, {
+                    productId,
+                    batchId: options.batchId || '',
+                    fileCount: fallbackFiles.length,
+                    totalSizeBytes: totalSize
+                });
+                return createResolvedFilePayload(fallbackFiles, fallbackFiles.length ? 'fresh-fallback-once' : 'fresh-scan-unavailable', folderName, {
+                    handleValid: false,
+                    forceFreshScan: true
+                });
             }
 
             const handleFiles = dedupeResolvedFiles((await collectVideoFilesFromDirectoryHandle(handle)).filter(isValidResolvedVideoFile));
@@ -861,7 +875,7 @@
 
     async function runTask(config) {
         const effectiveConfig = applyGlobalBatchConfig(config);
-        const resolvedSnapshot = await resolveSnapshotForProduct(effectiveConfig.productId, effectiveConfig);
+        const resolvedSnapshot = getSnapshotForProduct(effectiveConfig.productId);
         const task = buildTask({
             ...effectiveConfig,
             videoFolderPath: resolvedSnapshot?.folderName || effectiveConfig.videoFolderPath || ''
@@ -874,7 +888,7 @@
             productId: effectiveConfig.productId,
             folderName: task.folderName
         });
-        logEvent('info', `视频扫描数量：${task.scannedVideoCount}`, {
+        logEvent('info', `缓存视频数量：${task.scannedVideoCount}，实际扫描将在启动后立即执行`, {
             productId: effectiveConfig.productId,
             scannedVideoCount: task.scannedVideoCount,
             folderName: task.folderName
@@ -889,18 +903,6 @@
             selectedCount: task.videos.length,
             maxCount: task.maxCount
         });
-
-        if (!task.videos.length) {
-            setStatusAndLog(`商品 ${effectiveConfig.productId} 没有可执行的视频批次，已跳过`, 'error', {
-                productId: effectiveConfig.productId,
-                scannedVideoCount: task.scannedVideoCount
-            });
-            return {
-                productId: effectiveConfig.productId,
-                status: 'skip',
-                isFatal: false
-            };
-        }
 
         applyConfigToWorkbench(effectiveConfig, task);
         setStatusAndLog(`商品 ${effectiveConfig.productId} 已装载到工作台`, 'info', {

@@ -24,6 +24,7 @@
             let isNavigationLocked = false;
             let isPageStable = false;
             let pageStableTimer = null;
+            let START_LOCK = false;
             let currentPhase = 'UPLOAD_PHASE';
             let uploadFinished = false;
             let publishLocked = true;
@@ -71,6 +72,19 @@
                 ID_BINDING_DONE: false,
                 STATEMENT_DONE: false
             };
+            const startupPerf = {
+                active: false,
+                startedAt: 0,
+                marks: {},
+                durations: {
+                    bootstrap: 0,
+                    domReady: 0,
+                    fileScan: 0,
+                    batchBuild: 0,
+                    uploadInit: 0,
+                    idleWait: 0
+                }
+            };
 
             const getCfg = (id, defaultVal) => {
                 const el = document.getElementById(id);
@@ -81,6 +95,105 @@
             };
 
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            function nowTimeLabel() {
+                const now = new Date();
+                return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+            }
+
+            function resetStartupPerf() {
+                startupPerf.active = true;
+                startupPerf.startedAt = performance.now();
+                startupPerf.marks = {};
+                startupPerf.durations = {
+                    bootstrap: 0,
+                    domReady: 0,
+                    fileScan: 0,
+                    batchBuild: 0,
+                    uploadInit: 0,
+                    idleWait: 0
+                };
+                renderStartupPerfPanel();
+            }
+
+            function timerMark(name, metricName) {
+                const now = performance.now();
+                startupPerf.marks[name] = now;
+                if (metricName && startupPerf.marks[`${name}_start`]) {
+                    startupPerf.durations[metricName] = Math.max(0, Math.round(now - startupPerf.marks[`${name}_start`]));
+                }
+                const elapsed = Math.round(now - (startupPerf.startedAt || now));
+                console.log(`[TIMER] ${name}`, { elapsed });
+                addLog(`[TIMER] ${name}`, 'info');
+                renderStartupPerfPanel();
+            }
+
+            function timerStart(name) {
+                startupPerf.marks[`${name}_start`] = performance.now();
+                console.log(`[TIMER][${name}] start`);
+            }
+
+            function timerEnd(name, metricName = name) {
+                const started = startupPerf.marks[`${name}_start`] || performance.now();
+                const duration = Math.max(0, Math.round(performance.now() - started));
+                startupPerf.durations[metricName] = duration;
+                console.log(`[${nowTimeLabel()}][TIMER][${name}] ${duration}ms`);
+                addLog(`[TIMER][${name}] ${duration}ms`, 'info');
+                renderStartupPerfPanel();
+                return duration;
+            }
+
+            function renderStartupPerfPanel() {
+                const map = {
+                    bootstrap: startupPerf.durations.bootstrap,
+                    domReady: startupPerf.durations.domReady,
+                    fileScan: startupPerf.durations.fileScan,
+                    batchBuild: startupPerf.durations.batchBuild,
+                    uploadInit: startupPerf.durations.uploadInit,
+                    idleWait: startupPerf.durations.idleWait
+                };
+                Object.entries(map).forEach(([key, value]) => {
+                    const el = document.getElementById(`video-workbench-perf-${key}`);
+                    if (el) el.textContent = `${Math.round(value || 0)} ms`;
+                });
+            }
+
+            async function waitWithTimeout(predicate, timeout = 3000, interval = 250, label = 'wait') {
+                const startedAt = performance.now();
+                let attempts = 0;
+                const safeInterval = Math.min(Math.max(Number(interval) || 250, 50), 500);
+                while (performance.now() - startedAt <= timeout) {
+                    if (!isRunning && START_LOCK) {
+                        console.log(`[TIMER][${label}] interrupted`);
+                        return false;
+                    }
+                    attempts += 1;
+                    const passed = await Promise.resolve(predicate());
+                    if (passed) {
+                        const duration = Math.round(performance.now() - startedAt);
+                        console.log(`[${nowTimeLabel()}][TIMER][${label}] ${duration}ms`, { attempts });
+                        return true;
+                    }
+                    await sleep(safeInterval);
+                }
+                console.log(`[${nowTimeLabel()}][TIMER][${label}] timeout ${timeout}ms`, { attempts });
+                return false;
+            }
+
+            async function waitForStartDomReady() {
+                timerStart('domReady');
+                const ready = await waitWithTimeout(() => {
+                    return Boolean(
+                        document.body &&
+                        document.getElementById(ROOT_ID) &&
+                        document.getElementById('video-workbench-start') &&
+                        document.querySelector('#video-workbench-tab-publish')
+                    );
+                }, 3000, 250, 'dom_ready');
+                timerEnd('domReady', 'domReady');
+                timerMark('dom_ready');
+                return ready;
+            }
 
             function setPhase(phase) {
                 currentPhase = phase;
@@ -471,6 +584,12 @@
 
             async function scanFolderFiles(productId, config, options = {}) {
                 const force = options.force !== false;
+                timerMark('scan_start');
+                if (startupPerf.marks.dom_ready) {
+                    startupPerf.durations.idleWait = Math.max(0, Math.round(performance.now() - startupPerf.marks.dom_ready));
+                    renderStartupPerfPanel();
+                }
+                timerStart('scan');
                 transitionBatchState('SCANNING_FILES', {
                     productId,
                     force
@@ -482,6 +601,8 @@
                 });
                 if (!resolved) {
                     addLog('[SCAN] fresh scan failed: no resolver result', 'error');
+                    timerEnd('scan', 'fileScan');
+                    timerMark('scan_done');
                     return null;
                 }
 
@@ -489,6 +610,8 @@
                 const freshSize = freshFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
                 addLog('[SCAN] fresh scan executed', 'info');
                 addLog(`[SCAN] fileCount=${freshFiles.length} size=${formatMb(freshSize)}MB`, freshFiles.length ? 'info' : 'error');
+                timerEnd('scan', 'fileScan');
+                timerMark('scan_done');
                 console.log('SCAN_FRESH_RESULT', {
                     batchId: batchLifecycle.batchId,
                     productId,
@@ -614,16 +737,13 @@
                 return targets;
             }
 
-            async function waitForUploadNode({ timeout = 5000, interval = 200 } = {}) {
-                const startedAt = Date.now();
-                while (Date.now() - startedAt <= timeout) {
-                    const targets = findUploadTargets();
-                    if (targets.inputs.length || targets.dropZones.length) {
-                        return targets;
-                    }
-                    await sleep(interval);
-                }
-                return { inputs: [], dropZones: [] };
+            async function waitForUploadNode({ timeout = 3000, interval = 200 } = {}) {
+                let targets = { inputs: [], dropZones: [] };
+                await waitWithTimeout(() => {
+                    targets = findUploadTargets();
+                    return targets.inputs.length || targets.dropZones.length;
+                }, Math.min(timeout, 3000), Math.min(interval, 500), 'upload_zone_ready');
+                return targets.inputs.length || targets.dropZones.length ? targets : { inputs: [], dropZones: [] };
             }
 
             function injectFilesIntoInput(input, files) {
@@ -679,43 +799,43 @@
             }
 
             async function waitForUploadAcceptance(expectedFilesCount, timeout = 4000, interval = 200) {
-                const startedAt = Date.now();
-                while (Date.now() - startedAt <= timeout) {
+                let result = {
+                    accepted: false,
+                    matchedCount: 0,
+                    source: 'timeout'
+                };
+                await waitWithTimeout(() => {
                     const videoItems = Array.from(document.querySelectorAll('div[class*="video-list_singlePublish"]'));
                     if (videoItems.length > 0) {
-                        return {
+                        result = {
                             accepted: true,
                             matchedCount: videoItems.length,
                             source: 'video-list'
                         };
+                        return true;
                     }
 
                     const visibleFileInputs = Array.from(document.querySelectorAll('input[type="file"]')).filter((input) => {
                         return !input.closest?.(`#${ROOT_ID}`) && Number(input.files?.length || 0) >= expectedFilesCount;
                     });
                     if (visibleFileInputs.length > 0) {
-                        return {
+                        result = {
                             accepted: true,
                             matchedCount: visibleFileInputs[0].files.length,
                             source: 'input-files'
                         };
+                        return true;
                     }
-
-                    await sleep(interval);
-                }
-
-                return {
-                    accepted: false,
-                    matchedCount: 0,
-                    source: 'timeout'
-                };
+                    return false;
+                }, Math.min(timeout, 3000), Math.min(interval, 500), 'upload_acceptance');
+                return result;
             }
 
             async function confirmUploadSuccess(expectedFilesCount) {
                 return waitForUploadAcceptance(expectedFilesCount);
             }
 
-            async function waitForUploadCompletionStable(expectedFilesCount, settleMs = 1200) {
+            async function waitForUploadCompletionStable(expectedFilesCount, settleMs = 300) {
                 const result = await confirmUploadSuccess(expectedFilesCount);
                 if (!result?.accepted) {
                     return result;
@@ -779,7 +899,7 @@
                 return matches.some((match) => Number(match[1]) < 100);
             }
 
-            async function waitForUploadComplete(expectedCount, timeout = 10 * 60 * 1000) {
+            async function waitForUploadComplete(expectedCount, timeout = 30000) {
                 let stable = 0;
 
                 return new Promise((resolve) => {
@@ -814,7 +934,7 @@
                             stable = 0;
                         }
 
-                        if (stable >= 5) {
+                        if (stable >= 2) {
                             console.log('UPLOAD_TRUE_STABLE_CONFIRMED');
                             uploadFinished = true;
                             publishLocked = false;
@@ -841,7 +961,7 @@
                             return;
                         }
 
-                        setTimeout(check, 800);
+                        setTimeout(check, 500);
                     };
 
                     check();
@@ -862,7 +982,7 @@
                     const uploadStable = await currentUploadCompletePromise;
                     if (!uploadStable) return false;
                 }
-                const uiReady = await waitForPageStableAfterUpload(expectedCount, 30000, 300, 1600);
+                const uiReady = await waitForPageStableAfterUpload(expectedCount, 3000, 250, 300);
                 const queueEmpty = getUploadQueueState() === 0;
                 const loadingEmpty = getVisibleUploadLoadingNodes().length === 0;
                 const countReady = getVisibleVideoItems().length === expectedCount;
@@ -951,10 +1071,11 @@
                 };
             }
 
-            async function waitForPageStableAfterUpload(expectedFilesCount, timeout = 15000, interval = 250, stableWindow = 1500) {
+            async function waitForPageStableAfterUpload(expectedFilesCount, timeout = 3000, interval = 250, stableWindow = 300) {
                 resetPageStableState();
                 const startedAt = Date.now();
                 let stableSignature = '';
+                const safeInterval = Math.min(interval, 500);
 
                 while (Date.now() - startedAt <= timeout) {
                     const snapshot = getPageReadySnapshot(expectedFilesCount);
@@ -987,7 +1108,7 @@
                         resetPageStableState();
                     }
 
-                    await sleep(interval);
+                    await sleep(safeInterval);
                 }
 
                 console.log('PAGE_READY_GATE_TIMEOUT', { expectedFilesCount });
@@ -1001,11 +1122,14 @@
                     return false;
                 }
 
-                const uploadTargets = await waitForUploadNode({ timeout: 5000, interval: 200 });
+                timerStart('uploadInit');
+                const uploadTargets = await waitForUploadNode({ timeout: 3000, interval: 200 });
                 if (!uploadTargets.inputs.length && !uploadTargets.dropZones.length) {
                     addLog('等待上传节点超时：未命中 input / iframe / shadow / dropzone', 'error');
+                    timerEnd('uploadInit', 'uploadInit');
                     return false;
                 }
+                timerMark('upload_ready');
 
                 for (const target of uploadTargets.dropZones) {
                     try {
@@ -1016,6 +1140,7 @@
                         emitUploadSuccessCheck(files.length, result.accepted, `${target.type}-dropzone`);
                         if (result.accepted) {
                             addLog(`上传区域已接受文件：${result.source} / ${result.matchedCount} 个`, 'success');
+                            timerEnd('uploadInit', 'uploadInit');
                             return true;
                         }
                     } catch (error) {
@@ -1033,6 +1158,7 @@
                             emitUploadSuccessCheck(files.length, result.accepted, `${target.type}-input`);
                             if (result.accepted) {
                                 addLog(`上传控件已接受文件：${result.source} / ${result.matchedCount} 个`, 'success');
+                                timerEnd('uploadInit', 'uploadInit');
                                 return true;
                             }
                         }
@@ -1043,6 +1169,7 @@
 
                 addLog('未找到可用的上传控件或拖拽区域', 'error');
                 emitUploadSuccessCheck(files.length, false, 'none');
+                timerEnd('uploadInit', 'uploadInit');
                 return false;
             }
 
@@ -1351,7 +1478,7 @@
                     console.log('POST_BLOCKED_PHASE_LOCK', { ...phaseLock });
                     return false;
                 }
-                await waitForPageStableAfterUpload(currentBatchExpectedCount, 30000, 300, 1200);
+                await waitForPageStableAfterUpload(currentBatchExpectedCount, 3000, 250, 300);
                 setPhase('PUBLISH_PHASE');
                 transitionBatchState('COVER_PROCESSING', {
                     expectedCount: currentBatchExpectedCount
@@ -1412,7 +1539,9 @@
                         break;
                     }
 
+                    timerStart('batchBuild');
                     const splitResult = splitIntoBatches(scanned.files, config);
+                    timerEnd('batchBuild', 'batchBuild');
                     transitionBatchState('BATCH_SPLIT', {
                         fileCount: scanned.files.length,
                         batchCount: splitResult.batches.length
@@ -1543,75 +1672,10 @@
                     return false;
                 }
 
-                const resolved = await window.PddModules?.productConfigManager?.getResolvedVideoFiles?.(productId, {
-                    config,
-                    forceFreshScan: true,
-                    batchId: `${productId}-preflight-${Date.now()}`
-                });
-                if (!resolved) {
-                    addLog(`上传注入失败：商品 ${productId} 文件源解析失败`, 'error');
-                    return false;
-                }
-
-                addLog(`上传注入文件源：${resolved.sourceType} / ${resolved.count} 个文件`, resolved.count ? 'info' : 'error');
-                const rawFiles = resolved.files || [];
-                const files = typeof structuredClone === 'function'
-                    ? structuredClone(rawFiles)
-                    : Array.from(rawFiles);
-                const filteredFiles = applyBatchLimitStrict(files, {
+                addLog(`上传注入启动：商品 ${productId}，即将立即扫描目录`, 'info');
+                const uploadResult = await uploadFilesBatch([], {
                     ...config,
-                    maxSizeMB: Number(config?.maxSizeMB) || (String(config?.sizeUnit || 'MB').toUpperCase() === 'GB'
-                        ? Number(config?.maxSize || 0) * 1024
-                        : Number(config?.maxSize || 0))
-                });
-                console.log('BATCH_SELECTION_MISMATCH_CHECK', {
-                    expected: config?.maxCount,
-                    actualSelected: filteredFiles.length
-                });
-                if (filteredFiles.length > Number(config?.maxCount || 0)) {
-                    console.log('BATCH_SELECTION_MISMATCH_BLOCK');
-                    throw new Error('BATCH_FILTER_BROKEN');
-                }
-                const selectedFiles = typeof structuredClone === 'function'
-                    ? structuredClone(filteredFiles)
-                    : Array.from(filteredFiles);
-                const batchInputFiles = selectedFiles;
-                console.log('UPLOAD_SOURCE_LOCK', {
-                    original: config?.files?.length,
-                    selected: config?.selectedFiles?.length,
-                    resolved: batchInputFiles.length
-                });
-                console.log('UPLOAD_SOURCE_FILES', batchInputFiles.length);
-                if (!batchInputFiles.length) {
-                    throw new Error('NO_FILES_FOUND');
-                }
-                const splitResult = splitIntoBatches(batchInputFiles, {
-                    ...config,
-                    maxCount: config?.maxCount,
-                    maxSize: config?.maxSize
-                });
-                const firstBatch = splitResult.batches[0] || { files: [], totalBytes: 0 };
-                const batch = {
-                    files: firstBatch.files,
-                    maxCount: splitResult.maxCount,
-                    totalBytes: firstBatch.totalBytes
-                };
-                addLog(`上传注入选中 ${batch.files.length}/${batch.maxCount} 个文件 / ${batch.totalBytes} B`, batch.files.length ? 'info' : 'error');
-
-                if (!firstBatch.files.length) {
-                    addLog(`上传注入失败：商品 ${productId} 没有命中本批文件 / 来源 ${resolved.sourceType}`, 'error');
-                    if (allowRebindRetry) {
-                        const rebound = await triggerManualRebind(productId, 'empty-or-corrupted-files');
-                        if (rebound) {
-                            uploadAttemptState.delete(lockKey);
-                            return uploadInjectionStep({ allowRebindRetry: false, force: true });
-                        }
-                    }
-                    return false;
-                }
-
-                const uploadResult = await uploadFilesBatch(batchInputFiles, {
-                    ...config,
+                    productId,
                     maxCount: config?.maxCount,
                     maxSize: config?.maxSize
                 });
@@ -1913,6 +1977,40 @@
                     display: flex;
                     align-items: center;
                 }
+                #${ROOT_ID} .startup-perf-card {
+                    border: 1px solid #e5e5e5;
+                    border-radius: 6px;
+                    background: #fff;
+                    margin: 8px 0;
+                    overflow: hidden;
+                }
+                #${ROOT_ID} .startup-perf-header {
+                    padding: 7px 8px;
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: #34495e;
+                    background: #f6f8fa;
+                    cursor: pointer;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }
+                #${ROOT_ID} .startup-perf-body {
+                    padding: 7px 8px;
+                    display: grid;
+                    gap: 5px;
+                    font-size: 11px;
+                }
+                #${ROOT_ID} .startup-perf-row {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }
+                #${ROOT_ID} .startup-perf-value {
+                    font-family: Consolas, monospace;
+                    color: #16a085;
+                    font-weight: 700;
+                }
                 #${ROOT_ID} .collapsible-content {
                     overflow: hidden;
                     transition: max-height 0.3s ease-out;
@@ -1987,6 +2085,21 @@
                         <label class="task-config-item"><input type="checkbox" id="task-chk-title" checked> 标题</label>
                         <label class="task-config-item"><input type="checkbox" id="task-chk-declare" checked> 声明</label>
                         <label class="task-config-item"><input type="checkbox" id="task-chk-cover" checked> 封面</label>
+                    </div>
+
+                    <div class="startup-perf-card">
+                        <div class="startup-perf-header" id="video-workbench-perf-toggle">
+                            <span>启动性能监控</span>
+                            <span id="video-workbench-perf-arrow">▶</span>
+                        </div>
+                        <div class="startup-perf-body collapsible-content collapsed" id="video-workbench-perf-body">
+                            <div class="startup-perf-row"><span>bootstrap</span><span class="startup-perf-value" id="video-workbench-perf-bootstrap">0 ms</span></div>
+                            <div class="startup-perf-row"><span>DOM ready</span><span class="startup-perf-value" id="video-workbench-perf-domReady">0 ms</span></div>
+                            <div class="startup-perf-row"><span>file scan</span><span class="startup-perf-value" id="video-workbench-perf-fileScan">0 ms</span></div>
+                            <div class="startup-perf-row"><span>batch build</span><span class="startup-perf-value" id="video-workbench-perf-batchBuild">0 ms</span></div>
+                            <div class="startup-perf-row"><span>upload init</span><span class="startup-perf-value" id="video-workbench-perf-uploadInit">0 ms</span></div>
+                            <div class="startup-perf-row"><span>idle wait</span><span class="startup-perf-value" id="video-workbench-perf-idleWait">0 ms</span></div>
+                        </div>
                     </div>
 
                     <button class="ws-btn btn-run" id="video-workbench-start">开始</button>
@@ -2650,13 +2763,33 @@
             }
 
             document.getElementById('video-workbench-start').onclick = async function () {
+                if (START_LOCK) {
+                    addLog('[START_LOCK] 启动流程已在执行，忽略重复触发', 'info');
+                    return;
+                }
                 const tasks = ['task-chk-id', 'task-chk-title', 'task-chk-declare', 'task-chk-cover'];
                 if (!tasks.some((task) => document.getElementById(task).checked)) return alert('请至少勾选一个任务！');
+                resetStartupPerf();
+                timerMark('bootstrap_start');
+                timerStart('bootstrap');
                 isRunning = true;
                 isPaused = false;
                 this.disabled = true;
                 setControlsVisible(true);
                 resetPauseButton();
+                timerEnd('bootstrap', 'bootstrap');
+                timerMark('init_complete');
+                const domReady = await waitForStartDomReady();
+                if (!domReady) {
+                    addLog('[TIMER] dom_ready timeout，启动终止', 'error');
+                    isRunning = false;
+                    isPaused = false;
+                    this.disabled = false;
+                    setControlsVisible(true);
+                    resetPauseButton();
+                    return;
+                }
+                START_LOCK = true;
 
                 const id = document.getElementById('pub-id').value.trim();
                 const title = document.getElementById('pub-title').value;
@@ -2681,6 +2814,7 @@
                 } finally {
                     isRunning = false;
                     isPaused = false;
+                    START_LOCK = false;
                     this.disabled = false;
                     uploadAttemptState.delete(id);
                     setControlsVisible(true);
@@ -2720,6 +2854,7 @@
             };
             bindToggle('label-delay-config', 'content-delay-config', 'arrow-delay-config');
             bindToggle('label-declare-config', 'content-declare-config', 'arrow-declare-config');
+            bindToggle('video-workbench-perf-toggle', 'video-workbench-perf-body', 'video-workbench-perf-arrow');
 
             document.getElementById('video-workbench-log-toggle').onclick = () => {
                 const body = document.getElementById('video-workbench-log-list');
