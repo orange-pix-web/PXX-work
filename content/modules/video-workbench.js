@@ -1385,8 +1385,11 @@
                     return false;
                 }
                 console.log('SIDEBAR_CLICK_ATTEMPT', name);
-                const items = Array.from(document.querySelectorAll('li'));
-                const target = items.find((el) => el.innerText?.trim().includes(name) && el.offsetParent !== null);
+                const items = Array.from(document.querySelectorAll("li[data-testid='beast-core-menu-menuItem-li'], li"));
+                const target = items.find((el) => {
+                    const title = el.querySelector?.('[class*="menuItemTitle"]')?.innerText?.trim() || el.innerText?.trim() || '';
+                    return title.includes(name) && el.offsetParent !== null;
+                });
                 if (!target) {
                     console.log('SIDEBAR_NOT_FOUND', name);
                     return false;
@@ -1408,17 +1411,35 @@
                     console.log('PHASE_BLOCKED_PUBLISH_VIDEO', currentPhase);
                     return false;
                 }
-                const btn = document.querySelector("button[data-testid='beast-core-button']");
-                if (btn && btn.offsetParent !== null) {
-                    safeClick(btn);
-                    console.log('PUBLISH_CLICKED_BUTTON');
-                    console.log('PUBLISH_CLICK_STATUS', 'button');
-                    return true;
-                }
-
                 const clicked = await clickSidebar('发布视频');
-                console.log('PUBLISH_CLICK_STATUS', clicked ? 'fallback-sidebar' : 'failed');
+                console.log('PUBLISH_CLICK_STATUS', clicked ? 'sidebar' : 'failed');
                 return clicked;
+            }
+
+            function hasUploadAreaReady() {
+                const uploadTexts = Array.from(document.querySelectorAll('body *'))
+                    .filter((el) => el.offsetParent !== null && !el.closest?.(`#${ROOT_ID}`))
+                    .some((el) => /上传视频|添加视频|点击上传|拖拽至此区域/.test(el.innerText || el.textContent || ''));
+                const uploadButton = Array.from(document.querySelectorAll("button[data-testid='beast-core-button'], button"))
+                    .filter((btn) => btn.offsetParent !== null && !btn.closest?.(`#${ROOT_ID}`))
+                    .some((btn) => /添加视频|上传视频/.test(btn.innerText || btn.textContent || ''));
+                const uploadInput = Array.from(document.querySelectorAll('input[type="file"]'))
+                    .some((input) => !input.closest?.(`#${ROOT_ID}`));
+                const uploadDropzone = Boolean(document.querySelector('.no-video_noVideoWrap__opXQS, [class*="noVideoWrap"], [class*="upload"]'));
+                return uploadTexts || uploadButton || uploadInput || uploadDropzone;
+            }
+
+            async function waitForUploadAreaReady(timeout = 15000) {
+                const startedAt = Date.now();
+                while (Date.now() - startedAt < timeout) {
+                    if (hasUploadAreaReady()) {
+                        addLog('[导航] 发布视频页上传区域已就绪', 'success');
+                        return true;
+                    }
+                    await sleep(300);
+                }
+                addLog('[导航] 发布视频页上传区域未就绪，禁止进入下一批上传', 'error');
+                return false;
             }
 
             async function closeAllPopups() {
@@ -1457,7 +1478,7 @@
                     const hasVisibleFileInput = Array.from(document.querySelectorAll('input[type="file"]'))
                         .some((input) => input.offsetParent !== null && !input.closest?.(`#${ROOT_ID}`));
 
-                    if (hasAddProduct || hasPublishVideo || hasVisibleFileInput) {
+                    if (hasAddProduct || hasPublishVideo || hasVisibleFileInput || hasUploadAreaReady()) {
                         return true;
                     }
 
@@ -1505,18 +1526,34 @@
                 isNavigationLocked = true;
                 try {
                     await closeAllPopups();
+                    addLog('[导航] 点击左侧商家首页', 'info');
                     const sidebarHome = await clickSidebar('商家首页');
                     await sleep(1200);
+                    addLog('[导航] 点击左侧发布视频', 'info');
                     const sidebarPublish = await clickPublishVideo();
-                    await waitForPageReady();
+                    const pageReady = await waitForPageReady();
+                    const uploadAreaReady = await waitForUploadAreaReady();
                     console.log('CLICK_VERIFY', {
                         sidebar_home: sidebarHome,
-                        sidebar_publish: sidebarPublish
+                        sidebar_publish: sidebarPublish,
+                        pageReady,
+                        uploadAreaReady
                     });
+                    if (!sidebarHome || !sidebarPublish || !uploadAreaReady) {
+                        addLog('[导航] 批次间页面切换未完成，禁止进入下一批上传', 'error');
+                        return {
+                            sidebar_home: sidebarHome,
+                            sidebar_publish: sidebarPublish,
+                            page_ready: pageReady,
+                            upload_area_ready: uploadAreaReady
+                        };
+                    }
                     console.log('BATCH_NAVIGATION_DONE');
                     return {
                         sidebar_home: sidebarHome,
-                        sidebar_publish: sidebarPublish
+                        sidebar_publish: sidebarPublish,
+                        page_ready: pageReady,
+                        upload_area_ready: uploadAreaReady
                     };
                 } finally {
                     resetPageStableState();
@@ -1778,7 +1815,7 @@
                     markFilesProcessed(batch.files);
                     uploadedBatches = i + 1;
                     const navigationResult = await runNavigationPhase();
-                    if (!navigationResult?.sidebar_home || !navigationResult?.sidebar_publish) {
+                    if (!navigationResult?.sidebar_home || !navigationResult?.sidebar_publish || !navigationResult?.upload_area_ready) {
                         return {
                             accepted: false,
                             reason: 'navigation-failed',
@@ -1793,7 +1830,7 @@
                     if (uploadedBatches >= totalBatches) {
                         break;
                     }
-                    addLog(`[下一批] 批次完成后准备进入 ${uploadedBatches + 1}/${totalBatches}`, 'info');
+                    addLog(`[下一批] 已回到发布视频页，准备扫描并上传 ${uploadedBatches + 1}/${totalBatches}`, 'info');
                     await sleep(3000);
                 }
 
