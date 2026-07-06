@@ -667,10 +667,12 @@
         const snapshot = getSnapshotForProduct(config.productId);
         const files = snapshot?.files || [];
         const limitBytes = getSizeLimitBytes(config);
+        const maxCount = Math.max(1, Math.floor(toNumber(config.maxCount, DEFAULT_GLOBAL_BATCH_CONFIG.maxCount)));
         const selectedVideos = [];
         let totalBytes = 0;
 
         for (const file of files) {
+            if (selectedVideos.length >= maxCount) break;
             if (totalBytes + file.size > limitBytes) break;
             selectedVideos.push(file);
             totalBytes += file.size;
@@ -679,7 +681,7 @@
         return {
             productId: config.productId,
             videos: selectedVideos,
-            maxCount: files.length,
+            maxCount,
             maxSize: config.maxSize,
             maxSizeUnit: config.maxSizeUnit,
             status: selectedVideos.length ? 'ready' : 'empty',
@@ -2625,6 +2627,7 @@
         syncUi,
         onLog,
         emitLog,
-        getResolvedVideoFiles
+        getResolvedVideoFiles,
+        getGlobalBatchConfig
     };
 })();

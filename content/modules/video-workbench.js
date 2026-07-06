@@ -54,6 +54,23 @@
                 'BATCH_DONE',
                 'BATCH_BLOCKED'
             ];
+            const BATCH_STATE_LABELS = {
+                INIT: '初始化',
+                SCANNING_FILES: '扫描文件',
+                BATCH_SPLIT: '批次拆分',
+                UPLOAD_IN_PROGRESS: '上传中',
+                UPLOAD_COMPLETED: '上传完成',
+                TITLE_BINDING_DONE: '标题绑定完成',
+                ID_BINDING_DONE: '商品ID绑定完成',
+                STATEMENT_DONE: '声明完成',
+                COVER_PROCESSING: '封面处理中',
+                COVER_WAITING: '等待封面确认',
+                PUBLISHING: '发布中',
+                PUBLISH_WAITING: '等待发布确认',
+                PUBLISHED: '发布完成',
+                BATCH_DONE: '批次完成',
+                BATCH_BLOCKED: '批次阻断'
+            };
             const batchLifecycle = {
                 batchId: null,
                 state: 'INIT',
@@ -300,7 +317,7 @@
                     state: nextState,
                     ...data
                 });
-                addLog(`[STATE] ${nextState}`, 'info');
+                addLog(`[状态] ${BATCH_STATE_LABELS[nextState] || nextState}`, 'info');
                 return nextState;
             }
 
@@ -565,7 +582,14 @@
                 try {
                     const raw = JSON.parse(localStorage.getItem(PRODUCT_CONFIG_STORAGE_KEY) || '[]');
                     if (!Array.isArray(raw)) return null;
-                    return raw.find((item) => String(item?.productId || '').trim() === productId) || null;
+                    const config = raw.find((item) => String(item?.productId || '').trim() === productId) || null;
+                    const batchConfig = window.PddModules?.productConfigManager?.getGlobalBatchConfig?.();
+                    return config && batchConfig ? {
+                        ...config,
+                        maxCount: batchConfig.maxCount,
+                        maxSize: batchConfig.maxSize,
+                        maxSizeUnit: batchConfig.maxSizeUnit
+                    } : config;
                 } catch (error) {
                     addLog(`读取商品配置失败：${error?.message || error}`, 'error');
                     return null;
@@ -579,9 +603,21 @@
                     : maxSize * 1024 * 1024;
             }
 
+            function formatBytes(bytes) {
+                const units = ['B', 'KB', 'MB', 'GB'];
+                let value = Number(bytes) || 0;
+                let unitIndex = 0;
+                while (value >= 1024 && unitIndex < units.length - 1) {
+                    value /= 1024;
+                    unitIndex += 1;
+                }
+                return `${value.toFixed(unitIndex === 0 ? 0 : 2)} ${units[unitIndex]}`;
+            }
+
             function splitIntoBatches(files, config) {
                 const maxCount = Math.max(1, parseInt(config?.maxCount, 10) || 20);
                 const maxSizeBytes = getBatchLimitBytes(config);
+                addLog(`[批次限制] 数量上限=${maxCount}，大小上限=${formatBytes(maxSizeBytes)}`, 'info');
                 console.log('BATCH_SIZE', config?.maxCount);
                 const batches = [];
                 let currentBatch = [];
@@ -616,6 +652,7 @@
                     batchCount: batches.length,
                     batches: batches.map((batch) => batch.files.length)
                 });
+                addLog(`[批次拆分] 共 ${files.length} 个文件，拆为 ${batches.length} 批：${batches.map((batch) => batch.files.length).join(' / ')}`, 'info');
 
                 return {
                     batches,
@@ -1071,7 +1108,7 @@
                     declareCount: uiReady?.declareCount
                 });
                 if (!confirmed) {
-                    addLog('[UPLOAD_COMPLETED] not confirmed, blocked next phase', 'error');
+                    addLog('[上传完成] 未确认，已阻断下一阶段', 'error');
                     timerLog('upload_wait_done');
                     return false;
                 }
@@ -1083,7 +1120,7 @@
                     batchId,
                     expectedCount
                 });
-                addLog('[UPLOAD_COMPLETED] confirmed', 'success');
+                addLog('[上传完成] 已确认', 'success');
                 timerLog('upload_wait_done');
                 return true;
             }
@@ -2364,7 +2401,7 @@
                                 robustClick(next);
                                 await sleep(1200);
                                 videoBindingState.id.done.add(videoIndex);
-                                addLog(`ID 填入成功：视频 ${videoIndex + 1}`, 'success');
+                                addLog(`[商品ID] 视频 ${videoIndex + 1} 填入成功`, 'success');
                             }
                         }
                     }
@@ -2458,7 +2495,7 @@
 
                     const trigger = container.querySelector('[data-testid*="select"]') || container.querySelector('[class*="input"]');
                     if (!trigger) {
-                        addLog(`视频 ${videoIndex + 1} 未找到声明触发器`, 'error');
+                        addLog(`[声明] 视频 ${videoIndex + 1} 未找到声明触发器`, 'error');
                         continue;
                     }
                     videoBindingState.statementClickLock.add(videoIndex);
@@ -2468,10 +2505,10 @@
 
                     if (selected) {
                         videoBindingState.statement.done.add(videoIndex);
-                        addLog(`视频 ${videoIndex + 1} 声明设置成功：${targetText}`, 'success');
+                        addLog(`[声明] 视频 ${videoIndex + 1} 设置成功：${targetText}`, 'success');
                     } else {
                         videoBindingState.statementClickLock.delete(videoIndex);
-                        addLog(`视频 ${videoIndex + 1} 未找到选项“${targetText}”，可能浮层未弹出或文本不匹配`, 'error');
+                        addLog(`[声明] 视频 ${videoIndex + 1} 未找到选项“${targetText}”，可能浮层未弹出或文本不匹配`, 'error');
                         document.body.click();
                     }
                     await sleep(declareWait);
@@ -2901,6 +2938,42 @@
                 return false;
             }
 
+            function getElementText(el) {
+                return (el && (el.innerText || el.textContent) || '').trim().replace(/\s+/g, ' ');
+            }
+
+            function isVisibleElement(el) {
+                if (!el) return false;
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            }
+
+            function clickPublishConfirmIfPresent() {
+                const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .ant-modal, .el-dialog, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"]'))
+                    .filter((dialog) => isVisibleElement(dialog) && !dialog.closest?.(`#${ROOT_ID}`));
+                for (const dialog of dialogs) {
+                    const dialogText = getElementText(dialog);
+                    if (!/(确认|确定|提交|发布|审核|风险|提示)/.test(dialogText)) continue;
+                    const candidates = Array.from(dialog.querySelectorAll('button, [role="button"]'))
+                        .filter((btn) => {
+                            const text = getElementText(btn);
+                            return isVisibleElement(btn) &&
+                                /(确认|确定|发布|继续发布|提交|我知道了)/.test(text) &&
+                                !/(取消|返回|关闭|暂不)/.test(text) &&
+                                !btn.disabled &&
+                                btn.getAttribute('aria-disabled') !== 'true';
+                        });
+                    const primary = candidates.find((btn) => /primary|confirm|submit/i.test(String(btn.className || ''))) || candidates[0];
+                    if (primary) {
+                        primary.scrollIntoView({ block: 'center' });
+                        robustClick(primary);
+                        return getElementText(primary) || '确认';
+                    }
+                }
+                return '';
+            }
+
             function getPublishSuccessSnapshot(item) {
                 const itemText = item?.innerText || '';
                 const pageText = document.body?.innerText || '';
@@ -2923,8 +2996,14 @@
             async function waitPublishConfirm(item, videoIndex, total, timeout = 30000) {
                 let successConfirmed = false;
                 let uiConfirmed = false;
+                let confirmDialogClicked = false;
                 addLog(`[等待发布] 视频 ${videoIndex + 1}/${total}`, 'info');
                 await waitUntil(() => {
+                    const confirmClicked = clickPublishConfirmIfPresent();
+                    if (confirmClicked && !confirmDialogClicked) {
+                        confirmDialogClicked = true;
+                        addLog(`[发布] 视频 ${videoIndex + 1}/${total} 已点击确认弹窗：${confirmClicked}`, 'info');
+                    }
                     const snapshot = getPublishSuccessSnapshot(item);
                     if (snapshot.hasSuccessText) {
                         successConfirmed = true;
@@ -3128,11 +3207,13 @@
                     await checkPause();
                     const item = videoItems[i];
                     item.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    const pubBtn = Array.from(item.querySelectorAll('button')).find((btn) => btn.innerText.includes('发布'));
+                    const publishButtons = Array.from(item.querySelectorAll('button'))
+                        .filter((btn) => btn.offsetParent !== null && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true');
+                    const pubBtn = publishButtons.find((btn) => getElementText(btn) === '发布') ||
+                        publishButtons.find((btn) => getElementText(btn).includes('发布'));
                     if (pubBtn) {
                         updateStatus(`正在发布第 ${i + 1}/${videoItems.length} 个`);
                         addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 开始`, 'info');
-                        addLog(`[等待发布] 视频 ${i + 1}/${videoItems.length}`, 'info');
                         publishState.clicked.add(i);
                         robustClick(pubBtn);
                         const published = await waitForPublishSuccess(item, i + 1);
