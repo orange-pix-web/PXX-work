@@ -72,8 +72,11 @@
                 publish: false
             };
             const publishState = {
-                requested: new Set(),
+                clicked: new Set(),
                 successConfirmed: new Set(),
+                uiConfirmed: new Set()
+            };
+            const coverState = {
                 uiConfirmed: new Set()
             };
             const videoBindingState = {
@@ -282,6 +285,14 @@
                 if (nextState === 'BATCH_DONE' && (!batchExitGuard.upload || !batchExitGuard.cover || !batchExitGuard.publish)) {
                     throw new Error('BATCH_DONE_REQUIRES_EXIT_GUARD');
                 }
+                if (nextState === 'BATCH_DONE' && (
+                    !batchLifecycle.uploadCompleted ||
+                    !batchLifecycle.consistencyPassed ||
+                    !batchLifecycle.coverCompleted ||
+                    !batchLifecycle.publishCompleted
+                )) {
+                    throw new Error('BATCH_DONE_REQUIRES_CLOSED_LIFECYCLE');
+                }
 
                 batchLifecycle.state = nextState;
                 console.log('BATCH_STATE', {
@@ -306,9 +317,10 @@
                 batchExitGuard.upload = false;
                 batchExitGuard.cover = false;
                 batchExitGuard.publish = false;
-                publishState.requested = new Set();
+                publishState.clicked = new Set();
                 publishState.successConfirmed = new Set();
                 publishState.uiConfirmed = new Set();
+                coverState.uiConfirmed = new Set();
                 resetVideoBindingState();
             }
 
@@ -1478,7 +1490,8 @@
                 syncBindingStateFromDom(currentBatchExpectedCount);
                 phaseLock.TITLE_BINDING_DONE = videoBindingState.title.done.size === currentBatchExpectedCount;
                 if (!phaseLock.TITLE_BINDING_DONE) {
-                    addLog(`[TITLE] incomplete ${videoBindingState.title.done.size}/${currentBatchExpectedCount}`, 'error');
+                    addLog(`[标题] 未完成 ${videoBindingState.title.done.size}/${currentBatchExpectedCount}`, 'error');
+                    logLifecycleChecks(currentBatchExpectedCount, { nextBatchBlocked: true });
                     return false;
                 }
                 transitionBatchState('TITLE_BINDING_DONE', {
@@ -1493,7 +1506,8 @@
                 syncBindingStateFromDom(currentBatchExpectedCount);
                 phaseLock.ID_BINDING_DONE = videoBindingState.id.done.size === currentBatchExpectedCount;
                 if (!phaseLock.ID_BINDING_DONE) {
-                    addLog(`[ID] incomplete ${videoBindingState.id.done.size}/${currentBatchExpectedCount}`, 'error');
+                    addLog(`[商品ID] 未完成 ${videoBindingState.id.done.size}/${currentBatchExpectedCount}`, 'error');
+                    logLifecycleChecks(currentBatchExpectedCount, { nextBatchBlocked: true });
                     return false;
                 }
                 transitionBatchState('ID_BINDING_DONE', {
@@ -1508,7 +1522,8 @@
                 syncBindingStateFromDom(currentBatchExpectedCount);
                 phaseLock.STATEMENT_DONE = videoBindingState.statement.done.size === currentBatchExpectedCount;
                 if (!phaseLock.STATEMENT_DONE) {
-                    addLog(`[STATEMENT] incomplete ${videoBindingState.statement.done.size}/${currentBatchExpectedCount}`, 'error');
+                    addLog(`[声明] 未完成 ${videoBindingState.statement.done.size}/${currentBatchExpectedCount}`, 'error');
+                    logLifecycleChecks(currentBatchExpectedCount, { nextBatchBlocked: true });
                     return false;
                 }
                 transitionBatchState('STATEMENT_DONE', {
@@ -2289,17 +2304,17 @@
                     : getMissingIndexes('id', currentBatchExpectedCount);
                 const missingIndexes = requestedIndexes.filter((index) => !videoBindingState.id.done.has(index));
                 if (!missingIndexes.length) {
-                    addLog('[ID] skip: all videos already bound', 'info');
+                    addLog('[商品ID] 已全部绑定，跳过重复填充', 'info');
                     return;
                 }
                 const btns = getUniqueElements('添加商品');
-                addLog(`[ID] selective fill: missing=${missingIndexes.length}, buttons=${btns.length}`, 'info');
+                addLog(`[商品ID] 差量填充：缺失 ${missingIndexes.length} 个，可用按钮 ${btns.length} 个`, 'info');
                 for (let i = 0; i < Math.min(btns.length, missingIndexes.length); i++) {
                     if (!isRunning) return;
                     await checkPause();
                     const videoIndex = missingIndexes[i];
                     if (videoBindingState.id.done.has(videoIndex)) {
-                        addLog(`[ID] skip video ${videoIndex + 1}: already bound`, 'info');
+                        addLog(`[商品ID] 视频 ${videoIndex + 1} 已绑定，跳过`, 'info');
                         continue;
                     }
                     updateStatus(`[ID] ${i + 1}/${missingIndexes.length}`);
@@ -2336,22 +2351,22 @@
                     : getMissingIndexes('title', currentBatchExpectedCount);
                 const missingIndexes = requestedIndexes.filter((index) => !videoBindingState.title.done.has(index));
                 if (!missingIndexes.length) {
-                    addLog('[TITLE] skip: all videos already filled', 'info');
+                    addLog('[标题] 已全部填充，跳过重复填充', 'info');
                     return;
                 }
                 const unique = collectTitleTargets();
-                addLog(`[TITLE] selective fill: missing=${missingIndexes.length}, targets=${unique.length}`, 'info');
+                addLog(`[标题] 差量填充：缺失 ${missingIndexes.length} 个，可用输入位 ${unique.length} 个`, 'info');
                 for (const videoIndex of missingIndexes) {
                     if (!isRunning) return;
                     await checkPause();
                     if (videoBindingState.title.done.has(videoIndex)) {
-                        addLog(`[TITLE] skip video ${videoIndex + 1}: already filled`, 'info');
+                        addLog(`[标题] 视频 ${videoIndex + 1} 已填充，跳过`, 'info');
                         continue;
                     }
                     updateStatus(`[标题] ${videoIndex + 1}/${currentBatchExpectedCount}`);
                     const el = unique[videoIndex];
                     if (!el) {
-                        addLog(`[TITLE] video ${videoIndex + 1} target missing`, 'error');
+                        addLog(`[标题] 视频 ${videoIndex + 1} 未找到输入位`, 'error');
                         continue;
                     }
                     el.scrollIntoView({ block: 'center' });
@@ -2368,7 +2383,7 @@
                         el.dispatchEvent(new Event(eventName, { bubbles: true }));
                     });
                     videoBindingState.title.done.add(videoIndex);
-                    addLog(`[TITLE] filled video ${videoIndex + 1}/${currentBatchExpectedCount}`, 'success');
+                    addLog(`[标题] 视频 ${videoIndex + 1}/${currentBatchExpectedCount} 填充完成`, 'success');
                     await sleep(getCfg('cfg-title-sleep', 800));
                 }
             }
@@ -2382,7 +2397,7 @@
                     : getMissingIndexes('statement', currentBatchExpectedCount);
                 const missingIndexes = requestedIndexes.filter((index) => !videoBindingState.statement.done.has(index));
                 if (!missingIndexes.length) {
-                    addLog('[STATEMENT] skip: all videos already selected', 'info');
+                    addLog('[声明] 已全部选择，跳过重复点击', 'info');
                     return;
                 }
                 const allFormItems = collectDeclarationTargets();
@@ -2392,23 +2407,23 @@
                     return;
                 }
 
-                addLog(`[STATEMENT] selective fill: missing=${missingIndexes.length}, targets=${allFormItems.length}`, 'info');
+                addLog(`[声明] 差量选择：缺失 ${missingIndexes.length} 个，可用声明位 ${allFormItems.length} 个`, 'info');
 
                 for (const videoIndex of missingIndexes) {
                     if (!isRunning) return;
                     await checkPause();
                     if (videoBindingState.statement.done.has(videoIndex)) {
-                        addLog(`[STATEMENT] skip video ${videoIndex + 1}: already selected`, 'info');
+                        addLog(`[声明] 视频 ${videoIndex + 1} 已选择，跳过`, 'info');
                         continue;
                     }
                     if (videoBindingState.statementClickLock.has(videoIndex)) {
-                        addLog(`[STATEMENT] skip video ${videoIndex + 1}: click locked`, 'info');
+                        addLog(`[声明] 视频 ${videoIndex + 1} 点击锁已生效，跳过重复点击`, 'info');
                         continue;
                     }
                     updateStatus(`[声明] 处理中 ${videoIndex + 1}/${currentBatchExpectedCount}`);
                     const container = allFormItems[videoIndex];
                     if (!container) {
-                        addLog(`[STATEMENT] video ${videoIndex + 1} target missing`, 'error');
+                        addLog(`[声明] 视频 ${videoIndex + 1} 未找到声明区域`, 'error');
                         continue;
                     }
 
@@ -2470,7 +2485,7 @@
 
             async function reRunMissingFill() {
                 const diff = buildBindingDiff(currentBatchExpectedCount);
-                addLog(`[BACKTRACK] diff-only title=${diff.missingTitle.length} id=${diff.missingID.length} statement=${diff.missingStatement.length}`, 'info');
+                addLog(`[回溯修复] 仅补缺失项：标题 ${diff.missingTitle.length} 个，商品ID ${diff.missingID.length} 个，声明 ${diff.missingStatement.length} 个`, 'info');
                 if (document.getElementById('task-chk-title').checked) await taskPubFillTitle({ missingIndexes: diff.missingTitle });
                 if (document.getElementById('task-chk-id').checked) await taskPubFillID({ missingIndexes: diff.missingID });
                 if (document.getElementById('task-chk-declare').checked) await taskPubDeclare({ missingIndexes: diff.missingStatement });
@@ -2604,10 +2619,41 @@
                 };
             }
 
+            function logLifecycleChecks(expectedCount, options = {}) {
+                const counts = options.counts || getBindingCounts(expectedCount);
+                const publishCompleted = isPublishCompleted(expectedCount);
+                const coverCompleted = isCoverCompleted(expectedCount);
+                const backtrackTriggered = Boolean(options.backtrackTriggered);
+                const nextBatchBlocked = options.nextBatchBlocked === undefined
+                    ? !(batchLifecycle.uploadCompleted && batchLifecycle.consistencyPassed && coverCompleted && publishCompleted)
+                    : Boolean(options.nextBatchBlocked);
+                console.log('[CHECK] idFilled', `${counts.idCount}/${expectedCount}`);
+                console.log('[CHECK] statementFilled', `${counts.statementCount}/${expectedCount}`);
+                console.log('[CHECK] coverCompleted', coverCompleted);
+                console.log('[CHECK] publishCompleted', publishCompleted);
+                console.log('[CHECK] backtrackTriggered', backtrackTriggered);
+                console.log('[CHECK] nextBatchBlocked', nextBatchBlocked);
+                addLog(`[CHECK] idFilled=${counts.idCount}/${expectedCount}`, counts.idCount === expectedCount ? 'success' : 'error');
+                addLog(`[CHECK] statementFilled=${counts.statementCount}/${expectedCount}`, counts.statementCount === expectedCount ? 'success' : 'error');
+                addLog(`[CHECK] coverCompleted=${coverCompleted}`, coverCompleted ? 'success' : 'error');
+                addLog(`[CHECK] publishCompleted=${publishCompleted}`, publishCompleted ? 'success' : 'error');
+                addLog(`[CHECK] backtrackTriggered=${backtrackTriggered}`, backtrackTriggered ? 'error' : 'success');
+                addLog(`[CHECK] nextBatchBlocked=${nextBatchBlocked}`, nextBatchBlocked ? 'error' : 'success');
+                addLog(`[检查] 商品ID=${counts.idCount}/${expectedCount}，声明=${counts.statementCount}/${expectedCount}，封面完成=${coverCompleted}，发布完成=${publishCompleted}，下一批阻断=${nextBatchBlocked}`, nextBatchBlocked ? 'error' : 'success');
+                return {
+                    counts,
+                    coverCompleted,
+                    publishCompleted,
+                    backtrackTriggered,
+                    nextBatchBlocked
+                };
+            }
+
             async function verifyFillIntegrity(expectedCount) {
                 let counts = getBindingCounts(expectedCount);
                 let retryRound = 0;
                 let previousMissingCount = null;
+                let backtrackTriggered = false;
 
                 while (
                     retryRound < 3 &&
@@ -2625,11 +2671,12 @@
                             missingCount,
                             ...counts
                         });
-                        addLog('[BACKTRACK] stuck detected -> switch to selective fix mode', 'error');
+                        addLog('[回溯修复] 缺失数量未变化，保持差量修复模式并停止重复重试', 'error');
                         break;
                     }
                     previousMissingCount = missingCount;
                     retryRound += 1;
+                    backtrackTriggered = true;
                     console.log('BACKTRACK_FIX_TRIGGER', {
                         retryRound,
                         ...counts,
@@ -2637,7 +2684,7 @@
                         missingID: diff.missingID,
                         missingStatement: diff.missingStatement
                     });
-                    addLog(`[BACKTRACK_FIX] retry=${retryRound} title=${counts.titleCount}/${counts.videoCount} id=${counts.idCount}/${counts.videoCount} statement=${counts.statementCount}/${counts.videoCount}`, 'error');
+                    addLog(`[回溯修复] 第 ${retryRound} 次：标题 ${counts.titleCount}/${counts.videoCount}，商品ID ${counts.idCount}/${counts.videoCount}，声明 ${counts.statementCount}/${counts.videoCount}`, 'error');
                     if (document.getElementById('task-chk-title').checked) await taskPubFillTitle({ missingIndexes: diff.missingTitle });
                     if (document.getElementById('task-chk-id').checked) await taskPubFillID({ missingIndexes: diff.missingID });
                     if (document.getElementById('task-chk-declare').checked) await taskPubDeclare({ missingIndexes: diff.missingStatement });
@@ -2658,8 +2705,13 @@
                     verified,
                     ...counts
                 });
-                addLog(`[CONSISTENCY] title=${counts.titleCount}/${counts.videoCount} id=${counts.idCount}/${counts.videoCount} statement=${counts.statementCount}/${counts.videoCount} upload=${batchLifecycle.uploadCompleted}`, verified ? 'success' : 'error');
-                addLog(`[TITLE_VERIFY] dom=${counts.titleDomCount} value=${counts.titleValueCount} state=${counts.titleStateCount} final=${counts.titleCount}`, 'info');
+                addLog(`[一致性] 标题=${counts.titleCount}/${counts.videoCount} 商品ID=${counts.idCount}/${counts.videoCount} 声明=${counts.statementCount}/${counts.videoCount} 上传完成=${batchLifecycle.uploadCompleted}`, verified ? 'success' : 'error');
+                addLog(`[标题校验] 视觉=${counts.titleDomCount} 输入值=${counts.titleValueCount} 状态=${counts.titleStateCount} 最终=${counts.titleCount}`, 'info');
+                logLifecycleChecks(expectedCount, {
+                    counts,
+                    backtrackTriggered,
+                    nextBatchBlocked: true
+                });
                 return verified;
             }
 
@@ -2687,7 +2739,7 @@
                 });
                 addLog(`开始确认封面：识别到 ${btns.length} 个视频`, 'info');
                 if (btns.length < currentBatchExpectedCount) {
-                    addLog(`[COVER] blocked: expected ${currentBatchExpectedCount}, found ${btns.length}`, 'error');
+                    addLog(`[封面] 阻断：需要 ${currentBatchExpectedCount} 个，实际找到 ${btns.length} 个`, 'error');
                     return false;
                 }
                 for (let i = 0; i < btns.length; i++) {
@@ -2703,15 +2755,16 @@
                         robustClick(confirm);
                         const confirmed = await waitForCoverConfirmed(btn);
                         if (!confirmed) {
-                            addLog(`[COVER] confirm timeout: video ${i + 1}`, 'error');
+                            addLog(`[封面] 视频 ${i + 1} 确认超时`, 'error');
                             return false;
                         }
-                        addLog(`[COVER] confirmed video ${i + 1}/${btns.length}`, 'success');
+                        coverState.uiConfirmed.add(i);
+                        addLog(`[封面] 视频 ${i + 1}/${btns.length} 成功（已确认）`, 'success');
                         btn.dataset.done = 'true';
                         batchLifecycle.coverDoneCount = i + 1;
                         await sleep(1000);
                     } else {
-                        addLog(`[COVER] confirm button missing: video ${i + 1}`, 'error');
+                        addLog(`[封面] 视频 ${i + 1} 未找到确认按钮`, 'error');
                         document.body.click();
                         return false;
                     }
@@ -2753,38 +2806,55 @@
                 };
             }
 
+            function isCoverCompleted(total) {
+                return batchLifecycle.coverDoneCount >= total &&
+                    coverState.uiConfirmed.size === total &&
+                    !hasPendingCoverUi();
+            }
+
             async function waitUntilCoverCompleted(batchId, expectedCount) {
                 assertBatchState('COVER_WAITING');
                 timerLog('cover_wait_start');
                 const coverEnabled = Boolean(document.getElementById('task-chk-cover')?.checked);
                 if (!coverEnabled) {
                     batchLifecycle.coverDoneCount = expectedCount;
+                    coverState.uiConfirmed = new Set(Array.from({ length: expectedCount }, (_, index) => index));
                 }
                 const completed = await waitUntil(() => {
                     const coverDoneCount = batchLifecycle.coverDoneCount;
                     const publishButtonState = getPublishButtonState(expectedCount);
                     const pendingCoverUi = hasPendingCoverUi();
+                    const allCoverUIConfirmed = coverState.uiConfirmed.size === expectedCount;
                     const passed = coverDoneCount >= expectedCount &&
+                        allCoverUIConfirmed &&
                         publishButtonState.allPublishButtonsConfirmed &&
                         !pendingCoverUi;
                     console.log('COVER_WAIT_STATE', {
                         batchId,
                         coverDoneCount,
                         expectedCount,
+                        allCoverUIConfirmed,
                         allPublishButtonsConfirmed: publishButtonState.allPublishButtonsConfirmed,
                         pendingCoverUi
                     });
                     return passed;
                 }, 600000, 300, 'cover_wait');
                 if (!completed) {
-                    addLog('[COVER_WAIT] timeout or interrupted', 'error');
+                    logLifecycleChecks(expectedCount, { nextBatchBlocked: true });
+                    addLog('[等待封面确认] 超时或中断，禁止发布和进入下一批', 'error');
                     timerLog('cover_wait_done');
                     return false;
                 }
                 batchLifecycle.coverCompleted = true;
-                batchExitGuard.cover = true;
-                addLog('[COVER_WAIT] completed', 'success');
-                addLog('[COVER_COMPLETED]', 'success');
+                batchExitGuard.cover = isCoverCompleted(expectedCount);
+                logLifecycleChecks(expectedCount, { nextBatchBlocked: true });
+                if (!batchExitGuard.cover) {
+                    addLog('[批次保持] 封面未全部确认，禁止发布和进入下一批', 'error');
+                    timerLog('cover_wait_done');
+                    return false;
+                }
+                addLog('[等待封面确认] 完成', 'success');
+                addLog('[封面完成]', 'success');
                 timerLog('cover_wait_done');
                 return true;
             }
@@ -2824,7 +2894,7 @@
             async function waitPublishConfirm(item, videoIndex, total, timeout = 30000) {
                 let successConfirmed = false;
                 let uiConfirmed = false;
-                addLog(`[发布] 视频 ${videoIndex + 1}/${total} 等待发布确认`, 'info');
+                addLog(`[等待发布] 视频 ${videoIndex + 1}/${total}`, 'info');
                 await waitUntil(() => {
                     const snapshot = getPublishSuccessSnapshot(item);
                     if (snapshot.hasSuccessText) {
@@ -2905,7 +2975,7 @@
                     const waitingIndex = Math.min(batchLifecycle.publishedCount + 1, expectedCount);
                     if (!publishCompleted && waitingIndex !== lastWaitingIndex) {
                         lastWaitingIndex = waitingIndex;
-                        addLog(`[等待发布确认] 视频 ${waitingIndex}/${expectedCount}`, 'info');
+                        addLog(`[等待发布] 视频 ${waitingIndex}/${expectedCount}`, 'info');
                     }
                     console.log('PUBLISH_WAIT_STATE', {
                         batchId,
@@ -2920,6 +2990,7 @@
                 }, 600000, 300, 'publish_wait');
                 if (!completed) {
                     logPublishChecks(expectedCount);
+                    logLifecycleChecks(expectedCount, { nextBatchBlocked: true });
                     addLog('[等待发布确认] 超时或中断，禁止进入下一批', 'error');
                     timerLog('publish_wait_done');
                     return false;
@@ -2927,8 +2998,8 @@
                 batchLifecycle.publishCompleted = true;
                 batchExitGuard.publish = isPublishCompleted(expectedCount);
                 logPublishChecks(expectedCount);
+                logLifecycleChecks(expectedCount, { nextBatchBlocked: !batchExitGuard.publish });
                 if (!batchExitGuard.publish) {
-                    addLog('[BATCH_HOLD] publish not fully completed', 'error');
                     addLog('[批次保持] 发布未全部完成，禁止进入下一批', 'error');
                     timerLog('publish_wait_done');
                     return false;
@@ -2937,7 +3008,7 @@
                     publishedCount: batchLifecycle.publishedCount,
                     expectedCount
                 });
-                addLog('[等待发布确认] 完成', 'success');
+                addLog('[等待发布] 完成', 'success');
                 addLog('[发布完成]', 'success');
                 timerLog('publish_wait_done');
                 return true;
@@ -2963,13 +3034,28 @@
                 assertBatchState('PUBLISHED');
                 timerLog('batch_exit_check');
                 const noPendingUI = await waitForNoPendingUiState();
+                const coverCompleted = isCoverCompleted(currentBatchExpectedCount);
                 const publishCompleted = isPublishCompleted(currentBatchExpectedCount);
+                batchLifecycle.coverCompleted = coverCompleted;
+                batchLifecycle.publishCompleted = publishCompleted;
+                batchExitGuard.cover = coverCompleted;
                 batchExitGuard.publish = publishCompleted;
+                const lifecycleClosed = Boolean(
+                    batchLifecycle.uploadCompleted &&
+                    batchLifecycle.consistencyPassed &&
+                    coverCompleted &&
+                    publishCompleted
+                );
                 const allVideosPublished = publishCompleted;
                 const exitGuardReady = batchExitGuard.upload && batchExitGuard.cover && batchExitGuard.publish;
-                const completed = allVideosPublished && noPendingUI && batchLifecycle.state === 'PUBLISHED' && exitGuardReady;
+                const completed = lifecycleClosed && allVideosPublished && noPendingUI && batchLifecycle.state === 'PUBLISHED' && exitGuardReady;
                 logPublishChecks(currentBatchExpectedCount);
+                logLifecycleChecks(currentBatchExpectedCount, { nextBatchBlocked: !completed });
                 console.log('BATCH_COMPLETE_GUARD', {
+                    uploadCompleted: batchLifecycle.uploadCompleted,
+                    bindingIntegrityOK: batchLifecycle.consistencyPassed,
+                    coverCompleted,
+                    publishCompleted,
                     allVideosPublished,
                     noPendingUI,
                     state: batchLifecycle.state,
@@ -2984,9 +3070,8 @@
                         state: 'BATCH_BLOCKED',
                         batchExitGuard: { ...batchExitGuard }
                     });
-                    addLog('[BATCH_HOLD] publish not fully completed', 'error');
-                    addLog('[批次保持] 发布未全部完成，禁止进入下一批', 'error');
-                    addLog('[批次完成] 已阻断：封面/发布/UI 仍未完成', 'error');
+                    addLog('[批次保持] 上传/校验/封面/发布未全部闭环，禁止进入下一批', 'error');
+                    addLog('[批次完成] 已阻断：封面/发布/UI 或一致性仍未完成', 'error');
                     return false;
                 }
                 transitionBatchState('BATCH_DONE', {
@@ -3008,7 +3093,7 @@
                     addLog('未检测到待发布的视频项', 'error');
                     return false;
                 }
-                addLog(`检测到 ${videoItems.length} 个视频，开始逐一发布...`, 'info');
+                addLog(`检测到 ${videoItems.length} 个视频，开始逐一发布`, 'info');
                 for (let i = 0; i < videoItems.length; i++) {
                     if (!isRunning) return false;
                     await checkPause();
@@ -3018,8 +3103,8 @@
                     if (pubBtn) {
                         updateStatus(`正在发布第 ${i + 1}/${videoItems.length} 个`);
                         addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 开始`, 'info');
-                        addLog(`[等待发布确认] 视频 ${i + 1}/${videoItems.length}`, 'info');
-                        publishState.requested.add(i);
+                        addLog(`[等待发布] 视频 ${i + 1}/${videoItems.length}`, 'info');
+                        publishState.clicked.add(i);
                         robustClick(pubBtn);
                         const published = await waitForPublishSuccess(item, i + 1);
                         if (!published) {
@@ -3079,11 +3164,11 @@
                     flowSucceeded = Boolean(uploadPhaseResult?.accepted);
 
                     if (!uploadPhaseResult?.handledWorkflow) {
-                        addLog('[FLOW] blocked: upload workflow did not reach controlled batch lifecycle', 'error');
+                        addLog('[流程] 上传流程未进入受控批次状态机，已阻断', 'error');
                     }
                 } catch (error) {
                     console.error('VIDEO_WORKBENCH_FLOW_ERROR', error);
-                    addLog(`[FLOW] failed: ${error?.message || error}`, 'error');
+                    addLog(`[流程] 执行失败：${error?.message || error}`, 'error');
                 } finally {
                     isRunning = false;
                     isPaused = false;
