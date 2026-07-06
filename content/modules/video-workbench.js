@@ -401,15 +401,60 @@
 
             function safeClick(el) {
                 if (!el) return false;
-                el.addEventListener('click', (event) => {
-                    event.stopPropagation();
-                }, { once: true });
-                el.dispatchEvent(new MouseEvent('click', {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window
-                }));
+                el.scrollIntoView?.({ block: 'center', behavior: 'auto' });
+                ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach((type) => {
+                    el.dispatchEvent(new MouseEvent(type, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window
+                    }));
+                });
+                if (typeof el.click === 'function') {
+                    el.click();
+                }
                 return true;
+            }
+
+            function getCurrentUrl() {
+                return window.location?.href || '';
+            }
+
+            async function waitForUrlChanged(label, beforeUrl, timeout = 10000) {
+                const startedAt = Date.now();
+                while (Date.now() - startedAt < timeout) {
+                    const currentUrl = getCurrentUrl();
+                    if (currentUrl && currentUrl !== beforeUrl) {
+                        addLog(`[导航] ${label} URL 已切换`, 'success');
+                        console.log('NAVIGATION_URL_CHANGED', {
+                            label,
+                            beforeUrl,
+                            currentUrl
+                        });
+                        return true;
+                    }
+                    await sleep(250);
+                }
+                addLog(`[导航] ${label} URL 未切换`, 'error');
+                console.log('NAVIGATION_URL_NOT_CHANGED', {
+                    label,
+                    beforeUrl,
+                    currentUrl: getCurrentUrl()
+                });
+                return false;
+            }
+
+            async function clickSidebarAndWaitUrl(name, beforeUrl, timeout = 10000) {
+                for (let attempt = 1; attempt <= 2; attempt++) {
+                    const clicked = await clickSidebar(name);
+                    if (!clicked) {
+                        await sleep(800);
+                        continue;
+                    }
+                    const changed = await waitForUrlChanged(name, beforeUrl, timeout);
+                    if (changed) return true;
+                    addLog(`[导航] ${name} 第 ${attempt} 次点击未触发跳转，准备重试`, 'error');
+                }
+                return false;
             }
 
             function normalizeExecutionLogMessage(message) {
@@ -1526,18 +1571,23 @@
                 isNavigationLocked = true;
                 try {
                     await closeAllPopups();
+                    const publishUrlBeforeHome = getCurrentUrl();
                     addLog('[导航] 点击左侧商家首页', 'info');
-                    const sidebarHome = await clickSidebar('商家首页');
+                    const sidebarHome = await clickSidebarAndWaitUrl('商家首页', publishUrlBeforeHome);
                     await sleep(1200);
+                    const homeUrlBeforePublish = getCurrentUrl();
                     addLog('[导航] 点击左侧发布视频', 'info');
-                    const sidebarPublish = await clickPublishVideo();
+                    const sidebarPublish = await clickSidebarAndWaitUrl('发布视频', homeUrlBeforePublish);
                     const pageReady = await waitForPageReady();
                     const uploadAreaReady = await waitForUploadAreaReady();
                     console.log('CLICK_VERIFY', {
                         sidebar_home: sidebarHome,
                         sidebar_publish: sidebarPublish,
                         pageReady,
-                        uploadAreaReady
+                        uploadAreaReady,
+                        publishUrlBeforeHome,
+                        homeUrlBeforePublish,
+                        currentUrl: getCurrentUrl()
                     });
                     if (!sidebarHome || !sidebarPublish || !uploadAreaReady) {
                         addLog('[导航] 批次间页面切换未完成，禁止进入下一批上传', 'error');
