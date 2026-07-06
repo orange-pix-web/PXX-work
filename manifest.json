@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "name": "PDD Assistant",
+  "version": "0.1.9",
+  "description": "PDD browser extension with promotion goods and audit-status video batch delete tools with continuous current-page deletion and optional pagination.",
+  "permissions": [
+    "storage",
+    "downloads",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://live.pinduoduo.com/*",
+    "https://mms.pinduoduo.com/*",
+    "https://yingxiao.pinduoduo.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://live.pinduoduo.com/n-creator/video*",
+        "https://mms.pinduoduo.com/goods/evaluation/index*",
+        "https://yingxiao.pinduoduo.com/goods/promotion/list*"
+      ],
+      "js": [
+        "shared/style.js",
+        "shared/storage.js",
+        "shared/download.js",
+        "content/modules/clean-service.js",
+        "content/modules/product-config-manager.js",
+        "content/modules/video-workbench.js",
+        "content/modules/clean-module.js",
+        "content/modules/video-monitor.js",
+        "content/modules/video-download.js",
+        "content/modules/comment-auto-reply.js",
+        "content/modules/video-manage-delete.js",
+        "content/modules/promotion-goods-delete.js",
+        "content/floating-ball.js",
+        "content/content.js"
+      ],
+      "css": [
+        "content/styles/floating-ball.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}
