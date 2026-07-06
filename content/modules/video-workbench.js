@@ -47,9 +47,12 @@
                 'ID_BINDING_DONE',
                 'STATEMENT_DONE',
                 'COVER_PROCESSING',
+                'COVER_WAITING',
                 'PUBLISHING',
+                'PUBLISH_WAITING',
                 'PUBLISHED',
-                'BATCH_DONE'
+                'BATCH_DONE',
+                'BATCH_BLOCKED'
             ];
             const batchLifecycle = {
                 batchId: null,
@@ -57,9 +60,16 @@
                 uploadCompleted: false,
                 coverCompleted: false,
                 consistencyPassed: false,
+                publishCompleted: false,
+                coverDoneCount: 0,
                 publishedCount: 0,
                 expectedCount: 0,
                 processedFileKeys: new Set()
+            };
+            const batchExitGuard = {
+                upload: false,
+                cover: false,
+                publish: false
             };
             const videoBindingState = {
                 title: { done: new Set() },
@@ -128,6 +138,14 @@
                 renderStartupPerfPanel();
             }
 
+            function timerLog(name) {
+                console.log(`[TIMER] ${name}`, {
+                    batchId: batchLifecycle.batchId,
+                    state: batchLifecycle.state
+                });
+                addLog(`[TIMER] ${name}`, 'info');
+            }
+
             function timerStart(name) {
                 startupPerf.marks[`${name}_start`] = performance.now();
                 console.log(`[TIMER][${name}] start`);
@@ -177,6 +195,30 @@
                     await sleep(safeInterval);
                 }
                 console.log(`[${nowTimeLabel()}][TIMER][${label}] timeout ${timeout}ms`, { attempts });
+                return false;
+            }
+
+            async function waitUntil(conditionFn, timeout = 600000, interval = 300, label = 'wait_until') {
+                const startedAt = Date.now();
+                const safeInterval = Math.min(Math.max(Number(interval) || 300, 50), 500);
+                while (Date.now() - startedAt <= timeout) {
+                    if (!isRunning) {
+                        console.log(`[${label}] interrupted`);
+                        return false;
+                    }
+                    const passed = await Promise.resolve(conditionFn());
+                    if (passed) {
+                        console.log(`[${label}] pass`, {
+                            elapsedMs: Date.now() - startedAt
+                        });
+                        return true;
+                    }
+                    await sleep(safeInterval);
+                }
+                console.log(`[${label}] timeout`, {
+                    timeout,
+                    elapsedMs: Date.now() - startedAt
+                });
                 return false;
             }
 
@@ -232,6 +274,9 @@
                 if (nextState === 'PUBLISHING' && !batchLifecycle.coverCompleted) {
                     throw new Error('PUBLISH_REQUIRES_COVER_COMPLETED');
                 }
+                if (nextState === 'BATCH_DONE' && (!batchExitGuard.upload || !batchExitGuard.cover || !batchExitGuard.publish)) {
+                    throw new Error('BATCH_DONE_REQUIRES_EXIT_GUARD');
+                }
 
                 batchLifecycle.state = nextState;
                 console.log('BATCH_STATE', {
@@ -249,8 +294,13 @@
                 batchLifecycle.uploadCompleted = false;
                 batchLifecycle.coverCompleted = false;
                 batchLifecycle.consistencyPassed = false;
+                batchLifecycle.publishCompleted = false;
+                batchLifecycle.coverDoneCount = 0;
                 batchLifecycle.publishedCount = 0;
                 batchLifecycle.expectedCount = expectedCount;
+                batchExitGuard.upload = false;
+                batchExitGuard.cover = false;
+                batchExitGuard.publish = false;
                 resetVideoBindingState();
             }
 
@@ -974,13 +1024,17 @@
 
             async function waitUntilUploadCompleted(batchId, expectedCount) {
                 assertBatchState('UPLOAD_IN_PROGRESS');
+                timerLog('upload_wait_start');
                 console.log('WAIT_UPLOAD_COMPLETED_START', {
                     batchId,
                     expectedCount
                 });
                 if (currentUploadCompletePromise) {
                     const uploadStable = await currentUploadCompletePromise;
-                    if (!uploadStable) return false;
+                    if (!uploadStable) {
+                        timerLog('upload_wait_done');
+                        return false;
+                    }
                 }
                 const uiReady = await waitForPageStableAfterUpload(expectedCount, 3000, 250, 300);
                 const queueEmpty = getUploadQueueState() === 0;
@@ -998,16 +1052,19 @@
                 });
                 if (!confirmed) {
                     addLog('[UPLOAD_COMPLETED] not confirmed, blocked next phase', 'error');
+                    timerLog('upload_wait_done');
                     return false;
                 }
                 uploadFinished = true;
                 publishLocked = false;
                 batchLifecycle.uploadCompleted = true;
+                batchExitGuard.upload = true;
                 transitionBatchState('UPLOAD_COMPLETED', {
                     batchId,
                     expectedCount
                 });
                 addLog('[UPLOAD_COMPLETED] confirmed', 'success');
+                timerLog('upload_wait_done');
                 return true;
             }
 
@@ -1486,19 +1543,30 @@
                 if (document.getElementById('task-chk-cover').checked) {
                     const coverReady = await taskPubCover();
                     if (!coverReady) return false;
+                } else {
+                    batchLifecycle.coverDoneCount = currentBatchExpectedCount;
                 }
-                batchLifecycle.coverCompleted = true;
+                transitionBatchState('COVER_WAITING', {
+                    expectedCount: currentBatchExpectedCount,
+                    coverDoneCount: batchLifecycle.coverDoneCount
+                });
+                const coverCompleted = await waitUntilCoverCompleted(batchLifecycle.batchId, currentBatchExpectedCount);
+                if (!coverCompleted) return false;
                 transitionBatchState('PUBLISHING', {
                     expectedCount: currentBatchExpectedCount
                 });
                 if (document.getElementById('cfg-pub-auto').checked) {
                     const publishReady = await taskIndividualPublish();
                     if (!publishReady) return false;
+                } else {
+                    batchLifecycle.publishedCount = currentBatchExpectedCount;
                 }
-                transitionBatchState('PUBLISHED', {
+                transitionBatchState('PUBLISH_WAITING', {
                     publishedCount: batchLifecycle.publishedCount,
                     expectedCount: currentBatchExpectedCount
                 });
+                const publishCompleted = await waitUntilPublishCompleted(batchLifecycle.batchId, currentBatchExpectedCount);
+                if (!publishCompleted) return false;
                 console.log('PHASE_PUBLISH_DONE');
                 return true;
             }
@@ -1634,6 +1702,7 @@
                     if (uploadedBatches >= totalBatches) {
                         break;
                     }
+                    addLog(`[NEXT_BATCH] ready after BATCH_DONE ${uploadedBatches + 1}/${totalBatches}`, 'info');
                     await sleep(3000);
                 }
 
@@ -2597,6 +2666,7 @@
                     return false;
                 }
                 if (!document.getElementById('task-chk-cover').checked) return;
+                batchLifecycle.coverDoneCount = 0;
                 const rawBtns = Array.from(document.querySelectorAll('button, span')).filter((el) => {
                     return el.innerText?.trim() === '编辑封面' &&
                         el.offsetHeight > 0 &&
@@ -2615,16 +2685,12 @@
                 for (let i = 0; i < btns.length; i++) {
                     if (!isRunning) return;
                     await checkPause();
+                    addLog(`[COVER_WAIT] waiting video ${i + 1}/${btns.length}`, 'info');
                     updateStatus(`[封面] ${i + 1}/${btns.length}`);
                     const btn = btns[i];
                     btn.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    await sleep(500);
                     robustClick(btn);
-                    await sleep(getCfg('cfg-modal-wait', 1500));
-                    const confirm = Array.from(document.querySelectorAll('button, .ant-btn-primary'))
-                        .find((el) => (el.innerText?.trim() === '确定' || el.innerText?.includes('确认')) &&
-                            el.offsetHeight > 0 &&
-                            !el.closest(`#${ROOT_ID}`));
+                    const confirm = await waitForCoverConfirmButton();
                     if (confirm) {
                         robustClick(confirm);
                         const confirmed = await waitForCoverConfirmed(btn);
@@ -2634,6 +2700,7 @@
                         }
                         addLog(`[COVER] confirmed video ${i + 1}/${btns.length}`, 'success');
                         btn.dataset.done = 'true';
+                        batchLifecycle.coverDoneCount = i + 1;
                         await sleep(1000);
                     } else {
                         addLog(`[COVER] confirm button missing: video ${i + 1}`, 'error');
@@ -2641,6 +2708,76 @@
                         return false;
                     }
                 }
+                return true;
+            }
+
+            async function waitForCoverConfirmButton(timeout = 10000) {
+                let confirm = null;
+                await waitUntil(() => {
+                    confirm = Array.from(document.querySelectorAll('button, .ant-btn-primary'))
+                        .find((el) => (el.innerText?.trim() === '确定' || el.innerText?.includes('确认')) &&
+                            el.offsetHeight > 0 &&
+                            !el.closest(`#${ROOT_ID}`));
+                    return Boolean(confirm);
+                }, timeout, 300, 'cover_confirm_button');
+                return confirm;
+            }
+
+            function hasPendingCoverUi() {
+                return Array.from(document.querySelectorAll('.ant-modal, .el-dialog, [role="dialog"], [class*="modal"]'))
+                    .some((el) => {
+                        if (el.closest?.(`#${ROOT_ID}`) || el.offsetParent === null) return false;
+                        const text = el.innerText || el.textContent || '';
+                        return /封面|编辑封面|确定|确认/.test(text);
+                    });
+            }
+
+            function getPublishButtonState(expectedCount) {
+                const videoItems = Array.from(document.querySelectorAll('div[class*="video-list_singlePublish"]'))
+                    .filter((item) => item.offsetParent !== null && !item.closest?.(`#${ROOT_ID}`));
+                const items = videoItems.slice(0, expectedCount);
+                const readyCount = items.filter((item) => Array.from(item.querySelectorAll('button'))
+                    .some((btn) => btn.innerText?.includes('发布') && btn.offsetParent !== null && !btn.disabled)).length;
+                return {
+                    videoCount: videoItems.length,
+                    readyCount,
+                    allPublishButtonsConfirmed: items.length >= expectedCount && readyCount >= expectedCount
+                };
+            }
+
+            async function waitUntilCoverCompleted(batchId, expectedCount) {
+                assertBatchState('COVER_WAITING');
+                timerLog('cover_wait_start');
+                const coverEnabled = Boolean(document.getElementById('task-chk-cover')?.checked);
+                if (!coverEnabled) {
+                    batchLifecycle.coverDoneCount = expectedCount;
+                }
+                const completed = await waitUntil(() => {
+                    const coverDoneCount = batchLifecycle.coverDoneCount;
+                    const publishButtonState = getPublishButtonState(expectedCount);
+                    const pendingCoverUi = hasPendingCoverUi();
+                    const passed = coverDoneCount >= expectedCount &&
+                        publishButtonState.allPublishButtonsConfirmed &&
+                        !pendingCoverUi;
+                    console.log('COVER_WAIT_STATE', {
+                        batchId,
+                        coverDoneCount,
+                        expectedCount,
+                        allPublishButtonsConfirmed: publishButtonState.allPublishButtonsConfirmed,
+                        pendingCoverUi
+                    });
+                    return passed;
+                }, 600000, 300, 'cover_wait');
+                if (!completed) {
+                    addLog('[COVER_WAIT] timeout or interrupted', 'error');
+                    timerLog('cover_wait_done');
+                    return false;
+                }
+                batchLifecycle.coverCompleted = true;
+                batchExitGuard.cover = true;
+                addLog('[COVER_WAIT] completed', 'success');
+                addLog('[COVER_COMPLETED]', 'success');
+                timerLog('cover_wait_done');
                 return true;
             }
 
@@ -2658,8 +2795,8 @@
             }
 
             async function waitForPublishSuccess(item, index, timeout = 30000) {
-                const startedAt = Date.now();
-                while (Date.now() - startedAt < timeout) {
+                let confirmed = false;
+                await waitUntil(() => {
                     const itemText = item?.innerText || '';
                     const pageText = document.body?.innerText || '';
                     const loading = getVisibleUploadLoadingNodes().length;
@@ -2668,6 +2805,7 @@
                         .some((btn) => btn.innerText?.includes('发布') && btn.offsetParent !== null && !btn.disabled);
 
                     if (hasSuccessText || (!publishButtonVisible && loading === 0)) {
+                        confirmed = true;
                         console.log('PUBLISH_SUCCESS_CONFIRMED', {
                             index,
                             hasSuccessText,
@@ -2676,10 +2814,54 @@
                         });
                         return true;
                     }
-                    await sleep(500);
+                    return false;
+                }, timeout, 300, `publish_success_${index}`);
+                if (!confirmed) {
+                    console.log('PUBLISH_SUCCESS_TIMEOUT', { index });
                 }
-                console.log('PUBLISH_SUCCESS_TIMEOUT', { index });
-                return false;
+                return confirmed;
+            }
+
+            async function waitUntilPublishCompleted(batchId, expectedCount) {
+                assertBatchState('PUBLISH_WAITING');
+                timerLog('publish_wait_start');
+                const publishEnabled = Boolean(document.getElementById('cfg-pub-auto')?.checked);
+                if (!publishEnabled) {
+                    batchLifecycle.publishedCount = expectedCount;
+                }
+                let lastWaitingIndex = null;
+                const completed = await waitUntil(() => {
+                    const noPendingUI = !hasPendingUiState();
+                    const allPublished = batchLifecycle.publishedCount >= expectedCount;
+                    const waitingIndex = Math.min(batchLifecycle.publishedCount + 1, expectedCount);
+                    if (!allPublished && waitingIndex !== lastWaitingIndex) {
+                        lastWaitingIndex = waitingIndex;
+                        addLog(`[PUBLISH_WAIT] waiting video ${waitingIndex}/${expectedCount}`, 'info');
+                    }
+                    console.log('PUBLISH_WAIT_STATE', {
+                        batchId,
+                        publishedCount: batchLifecycle.publishedCount,
+                        expectedCount,
+                        allPublished,
+                        noPendingUI
+                    });
+                    return allPublished && noPendingUI;
+                }, 600000, 300, 'publish_wait');
+                if (!completed) {
+                    addLog('[PUBLISH_WAIT] timeout or interrupted', 'error');
+                    timerLog('publish_wait_done');
+                    return false;
+                }
+                batchLifecycle.publishCompleted = true;
+                batchExitGuard.publish = true;
+                transitionBatchState('PUBLISHED', {
+                    publishedCount: batchLifecycle.publishedCount,
+                    expectedCount
+                });
+                addLog('[PUBLISH_WAIT] completed', 'success');
+                addLog('[PUBLISH_COMPLETED]', 'success');
+                timerLog('publish_wait_done');
+                return true;
             }
 
             function hasPendingUiState() {
@@ -2700,19 +2882,28 @@
 
             async function completeBatchIfReady() {
                 assertBatchState('PUBLISHED');
+                timerLog('batch_exit_check');
                 const noPendingUI = await waitForNoPendingUiState();
-                const allVideosPublished = batchLifecycle.publishedCount >= currentBatchExpectedCount ||
-                    !document.getElementById('cfg-pub-auto')?.checked;
-                const completed = allVideosPublished && noPendingUI && batchLifecycle.state === 'PUBLISHED';
+                const allVideosPublished = batchLifecycle.publishedCount >= currentBatchExpectedCount;
+                const exitGuardReady = batchExitGuard.upload && batchExitGuard.cover && batchExitGuard.publish;
+                const completed = allVideosPublished && noPendingUI && batchLifecycle.state === 'PUBLISHED' && exitGuardReady;
                 console.log('BATCH_COMPLETE_GUARD', {
                     allVideosPublished,
                     noPendingUI,
                     state: batchLifecycle.state,
                     publishedCount: batchLifecycle.publishedCount,
-                    expectedCount: currentBatchExpectedCount
+                    expectedCount: currentBatchExpectedCount,
+                    batchExitGuard: { ...batchExitGuard }
                 });
                 if (!completed) {
-                    addLog('[BATCH_DONE] blocked: pending publish/UI state', 'error');
+                    batchLifecycle.state = 'BATCH_BLOCKED';
+                    console.log('BATCH_STATE', {
+                        batchId: batchLifecycle.batchId,
+                        state: 'BATCH_BLOCKED',
+                        batchExitGuard: { ...batchExitGuard }
+                    });
+                    addLog('[BATCH_HOLD] publish not completed', 'error');
+                    addLog('[BATCH_DONE] blocked: pending cover/publish/UI state', 'error');
                     return false;
                 }
                 transitionBatchState('BATCH_DONE', {
@@ -2740,11 +2931,11 @@
                     await checkPause();
                     const item = videoItems[i];
                     item.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    await sleep(500);
                     const pubBtn = Array.from(item.querySelectorAll('button')).find((btn) => btn.innerText.includes('发布'));
                     if (pubBtn) {
                         updateStatus(`正在发布第 ${i + 1}/${videoItems.length} 个`);
                         addLog(`[PUBLISH] video ${i + 1}/${videoItems.length} start`, 'info');
+                        addLog(`[PUBLISH_WAIT] waiting video ${i + 1}/${videoItems.length}`, 'info');
                         robustClick(pubBtn);
                         const published = await waitForPublishSuccess(item, i + 1);
                         if (!published) {
@@ -2753,7 +2944,6 @@
                         }
                         batchLifecycle.publishedCount = i + 1;
                         addLog(`[PUBLISH] video ${i + 1}/${videoItems.length} success confirmed`, 'success');
-                        await sleep(getCfg('cfg-loop-wait', 2000));
                     } else {
                         addLog(`[PUBLISH] video ${i + 1}/${videoItems.length} button missing`, 'error');
                         return false;
