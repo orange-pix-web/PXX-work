@@ -71,6 +71,11 @@
                 cover: false,
                 publish: false
             };
+            const publishState = {
+                requested: new Set(),
+                successConfirmed: new Set(),
+                uiConfirmed: new Set()
+            };
             const videoBindingState = {
                 title: { done: new Set() },
                 id: { done: new Set() },
@@ -301,6 +306,9 @@
                 batchExitGuard.upload = false;
                 batchExitGuard.cover = false;
                 batchExitGuard.publish = false;
+                publishState.requested = new Set();
+                publishState.successConfirmed = new Set();
+                publishState.uiConfirmed = new Set();
                 resetVideoBindingState();
             }
 
@@ -1702,7 +1710,7 @@
                     if (uploadedBatches >= totalBatches) {
                         break;
                     }
-                    addLog(`[NEXT_BATCH] ready after BATCH_DONE ${uploadedBatches + 1}/${totalBatches}`, 'info');
+                    addLog(`[下一批] 批次完成后准备进入 ${uploadedBatches + 1}/${totalBatches}`, 'info');
                     await sleep(3000);
                 }
 
@@ -2685,7 +2693,7 @@
                 for (let i = 0; i < btns.length; i++) {
                     if (!isRunning) return;
                     await checkPause();
-                    addLog(`[COVER_WAIT] waiting video ${i + 1}/${btns.length}`, 'info');
+                    addLog(`[等待封面确认] 视频 ${i + 1}/${btns.length}`, 'info');
                     updateStatus(`[封面] ${i + 1}/${btns.length}`);
                     const btn = btns[i];
                     btn.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -2794,32 +2802,91 @@
                 return false;
             }
 
-            async function waitForPublishSuccess(item, index, timeout = 30000) {
-                let confirmed = false;
-                await waitUntil(() => {
-                    const itemText = item?.innerText || '';
-                    const pageText = document.body?.innerText || '';
-                    const loading = getVisibleUploadLoadingNodes().length;
-                    const hasSuccessText = /发布成功|已发布|提交成功|审核中/.test(itemText) || /发布成功|提交成功/.test(pageText);
-                    const publishButtonVisible = Array.from(item?.querySelectorAll?.('button') || [])
-                        .some((btn) => btn.innerText?.includes('发布') && btn.offsetParent !== null && !btn.disabled);
+            function getPublishSuccessSnapshot(item) {
+                const itemText = item?.innerText || '';
+                const pageText = document.body?.innerText || '';
+                const loading = getVisibleUploadLoadingNodes().length;
+                const hasSuccessText = /发布成功|已发布|提交成功|审核中/.test(itemText);
+                const hasGlobalSuccessText = /发布成功|提交成功/.test(pageText);
+                const publishButtonVisible = Array.from(item?.querySelectorAll?.('button') || [])
+                    .some((btn) => btn.innerText?.includes('发布') && btn.offsetParent !== null && !btn.disabled);
+                const noPendingUI = !hasPendingUiState();
+                return {
+                    hasSuccessText,
+                    hasGlobalSuccessText,
+                    publishButtonVisible,
+                    loading,
+                    noPendingUI,
+                    uiStable: hasSuccessText && noPendingUI && loading === 0
+                };
+            }
 
-                    if (hasSuccessText || (!publishButtonVisible && loading === 0)) {
-                        confirmed = true;
-                        console.log('PUBLISH_SUCCESS_CONFIRMED', {
-                            index,
-                            hasSuccessText,
-                            publishButtonVisible,
-                            loading
-                        });
-                        return true;
+            async function waitPublishConfirm(item, videoIndex, total, timeout = 30000) {
+                let successConfirmed = false;
+                let uiConfirmed = false;
+                addLog(`[发布] 视频 ${videoIndex + 1}/${total} 等待发布确认`, 'info');
+                await waitUntil(() => {
+                    const snapshot = getPublishSuccessSnapshot(item);
+                    if (snapshot.hasSuccessText) {
+                        successConfirmed = true;
+                        publishState.successConfirmed.add(videoIndex);
                     }
+                    if (successConfirmed && snapshot.uiStable) {
+                        uiConfirmed = true;
+                        publishState.uiConfirmed.add(videoIndex);
+                    }
+                    console.log('PUBLISH_CONFIRM_STATE', {
+                        videoIndex: videoIndex + 1,
+                        total,
+                        successConfirmed,
+                        uiConfirmed,
+                        ...snapshot
+                    });
+                    return successConfirmed && uiConfirmed;
+                }, timeout, 300, `publish_confirm_${videoIndex + 1}`);
+
+                if (!successConfirmed || !uiConfirmed) {
+                    addLog(`[发布] 视频 ${videoIndex + 1}/${total} 发布成功未确认`, 'error');
+                    console.log('PUBLISH_CONFIRM_FAILED', {
+                        videoIndex: videoIndex + 1,
+                        total,
+                        successConfirmed,
+                        uiConfirmed
+                    });
                     return false;
-                }, timeout, 300, `publish_success_${index}`);
-                if (!confirmed) {
-                    console.log('PUBLISH_SUCCESS_TIMEOUT', { index });
                 }
-                return confirmed;
+                addLog(`[发布] 视频 ${videoIndex + 1}/${total} 成功（已确认）`, 'success');
+                return true;
+            }
+
+            async function waitForPublishSuccess(item, index, timeout = 30000) {
+                return waitPublishConfirm(item, index - 1, currentBatchExpectedCount, timeout);
+            }
+
+            function isPublishCompleted(total) {
+                return publishState.successConfirmed.size === total && publishState.uiConfirmed.size === total;
+            }
+
+            function logPublishChecks(total) {
+                const publishCompleted = isPublishCompleted(total);
+                const exitBlocked = !publishCompleted || !batchExitGuard.publish;
+                console.log('[CHECK] publishCount', `${batchLifecycle.publishedCount}/${total}`);
+                console.log('[CHECK] publishSuccessCount', publishState.successConfirmed.size);
+                console.log('[CHECK] exitBlocked', exitBlocked);
+                console.log('[CHECK] batchExitGuard.publish', batchExitGuard.publish);
+                addLog(`[CHECK] publishCount=${batchLifecycle.publishedCount}/${total}`, 'info');
+                addLog(`[CHECK] publishSuccessCount=${publishState.successConfirmed.size}`, 'info');
+                addLog(`[CHECK] publishUiConfirmedCount=${publishState.uiConfirmed.size}`, 'info');
+                addLog(`[CHECK] exitBlocked=${exitBlocked}`, exitBlocked ? 'error' : 'success');
+                addLog(`[CHECK] batchExitGuard.publish=${batchExitGuard.publish}`, batchExitGuard.publish ? 'success' : 'error');
+                addLog(`[检查] 发布计数=${batchLifecycle.publishedCount}/${total}`, 'info');
+                addLog(`[检查] 发布成功确认=${publishState.successConfirmed.size}`, 'info');
+                addLog(`[检查] 退出阻断=${exitBlocked}`, exitBlocked ? 'error' : 'success');
+                addLog(`[检查] 发布退出锁=${batchExitGuard.publish}`, batchExitGuard.publish ? 'success' : 'error');
+                return {
+                    publishCompleted,
+                    exitBlocked
+                };
             }
 
             async function waitUntilPublishCompleted(batchId, expectedCount) {
@@ -2828,38 +2895,50 @@
                 const publishEnabled = Boolean(document.getElementById('cfg-pub-auto')?.checked);
                 if (!publishEnabled) {
                     batchLifecycle.publishedCount = expectedCount;
+                    publishState.successConfirmed = new Set(Array.from({ length: expectedCount }, (_, index) => index));
+                    publishState.uiConfirmed = new Set(Array.from({ length: expectedCount }, (_, index) => index));
                 }
                 let lastWaitingIndex = null;
                 const completed = await waitUntil(() => {
                     const noPendingUI = !hasPendingUiState();
-                    const allPublished = batchLifecycle.publishedCount >= expectedCount;
+                    const publishCompleted = isPublishCompleted(expectedCount);
                     const waitingIndex = Math.min(batchLifecycle.publishedCount + 1, expectedCount);
-                    if (!allPublished && waitingIndex !== lastWaitingIndex) {
+                    if (!publishCompleted && waitingIndex !== lastWaitingIndex) {
                         lastWaitingIndex = waitingIndex;
-                        addLog(`[PUBLISH_WAIT] waiting video ${waitingIndex}/${expectedCount}`, 'info');
+                        addLog(`[等待发布确认] 视频 ${waitingIndex}/${expectedCount}`, 'info');
                     }
                     console.log('PUBLISH_WAIT_STATE', {
                         batchId,
                         publishedCount: batchLifecycle.publishedCount,
+                        publishSuccessCount: publishState.successConfirmed.size,
+                        publishUiConfirmedCount: publishState.uiConfirmed.size,
                         expectedCount,
-                        allPublished,
+                        publishCompleted,
                         noPendingUI
                     });
-                    return allPublished && noPendingUI;
+                    return publishCompleted && noPendingUI;
                 }, 600000, 300, 'publish_wait');
                 if (!completed) {
-                    addLog('[PUBLISH_WAIT] timeout or interrupted', 'error');
+                    logPublishChecks(expectedCount);
+                    addLog('[等待发布确认] 超时或中断，禁止进入下一批', 'error');
                     timerLog('publish_wait_done');
                     return false;
                 }
                 batchLifecycle.publishCompleted = true;
-                batchExitGuard.publish = true;
+                batchExitGuard.publish = isPublishCompleted(expectedCount);
+                logPublishChecks(expectedCount);
+                if (!batchExitGuard.publish) {
+                    addLog('[BATCH_HOLD] publish not fully completed', 'error');
+                    addLog('[批次保持] 发布未全部完成，禁止进入下一批', 'error');
+                    timerLog('publish_wait_done');
+                    return false;
+                }
                 transitionBatchState('PUBLISHED', {
                     publishedCount: batchLifecycle.publishedCount,
                     expectedCount
                 });
-                addLog('[PUBLISH_WAIT] completed', 'success');
-                addLog('[PUBLISH_COMPLETED]', 'success');
+                addLog('[等待发布确认] 完成', 'success');
+                addLog('[发布完成]', 'success');
                 timerLog('publish_wait_done');
                 return true;
             }
@@ -2884,9 +2963,12 @@
                 assertBatchState('PUBLISHED');
                 timerLog('batch_exit_check');
                 const noPendingUI = await waitForNoPendingUiState();
-                const allVideosPublished = batchLifecycle.publishedCount >= currentBatchExpectedCount;
+                const publishCompleted = isPublishCompleted(currentBatchExpectedCount);
+                batchExitGuard.publish = publishCompleted;
+                const allVideosPublished = publishCompleted;
                 const exitGuardReady = batchExitGuard.upload && batchExitGuard.cover && batchExitGuard.publish;
                 const completed = allVideosPublished && noPendingUI && batchLifecycle.state === 'PUBLISHED' && exitGuardReady;
+                logPublishChecks(currentBatchExpectedCount);
                 console.log('BATCH_COMPLETE_GUARD', {
                     allVideosPublished,
                     noPendingUI,
@@ -2902,15 +2984,16 @@
                         state: 'BATCH_BLOCKED',
                         batchExitGuard: { ...batchExitGuard }
                     });
-                    addLog('[BATCH_HOLD] publish not completed', 'error');
-                    addLog('[BATCH_DONE] blocked: pending cover/publish/UI state', 'error');
+                    addLog('[BATCH_HOLD] publish not fully completed', 'error');
+                    addLog('[批次保持] 发布未全部完成，禁止进入下一批', 'error');
+                    addLog('[批次完成] 已阻断：封面/发布/UI 仍未完成', 'error');
                     return false;
                 }
                 transitionBatchState('BATCH_DONE', {
                     publishedCount: batchLifecycle.publishedCount,
                     expectedCount: currentBatchExpectedCount
                 });
-                addLog('[QUEUE] completed after all videos published', 'success');
+                addLog('[队列] 全部视频发布完成后批次完成', 'success');
                 return true;
             }
 
@@ -2934,18 +3017,18 @@
                     const pubBtn = Array.from(item.querySelectorAll('button')).find((btn) => btn.innerText.includes('发布'));
                     if (pubBtn) {
                         updateStatus(`正在发布第 ${i + 1}/${videoItems.length} 个`);
-                        addLog(`[PUBLISH] video ${i + 1}/${videoItems.length} start`, 'info');
-                        addLog(`[PUBLISH_WAIT] waiting video ${i + 1}/${videoItems.length}`, 'info');
+                        addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 开始`, 'info');
+                        addLog(`[等待发布确认] 视频 ${i + 1}/${videoItems.length}`, 'info');
+                        publishState.requested.add(i);
                         robustClick(pubBtn);
                         const published = await waitForPublishSuccess(item, i + 1);
                         if (!published) {
-                            addLog(`[PUBLISH] video ${i + 1}/${videoItems.length} success not confirmed`, 'error');
+                            addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 发布成功未确认`, 'error');
                             return false;
                         }
                         batchLifecycle.publishedCount = i + 1;
-                        addLog(`[PUBLISH] video ${i + 1}/${videoItems.length} success confirmed`, 'success');
                     } else {
-                        addLog(`[PUBLISH] video ${i + 1}/${videoItems.length} button missing`, 'error');
+                        addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 未找到发布按钮`, 'error');
                         return false;
                     }
                 }
