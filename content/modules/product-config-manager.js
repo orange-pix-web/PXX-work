@@ -466,7 +466,7 @@
                     ...(state.liveFiles[productId] || []),
                     ...(state.persistedFiles[productId] || [])
                 ].filter(isValidResolvedVideoFile));
-                const folderName = fallbackFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || '';
+            const folderName = fallbackFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || '';
                 const totalSize = fallbackFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
                 logEvent('scan_debug', fallbackFiles.length ? '[SCAN] fresh scan fallback once' : '[SCAN] fresh scan failed: folder handle unavailable', {
                     productId,
@@ -623,7 +623,7 @@
     function getSnapshotForProduct(productId) {
         if (state.liveFiles[productId]?.length) {
             const files = state.liveFiles[productId].map(buildVideoMeta);
-            const folderName = state.liveFiles[productId][0]?.webkitRelativePath?.split('/')[0] || '';
+            const folderName = state.liveFiles[productId][0]?.webkitRelativePath?.split('/')[0] || state.currentFolderMeta?.folderName || '';
             return {
                 folderName,
                 fileCount: files.length,
@@ -634,7 +634,7 @@
 
         if (state.persistedFiles[productId]?.length) {
             const files = state.persistedFiles[productId].map(buildVideoMeta);
-            const folderName = state.persistedFiles[productId][0]?.webkitRelativePath?.split('/')[0] || '';
+            const folderName = state.persistedFiles[productId][0]?.webkitRelativePath?.split('/')[0] || state.currentFolderMeta?.folderName || '';
             return {
                 folderName,
                 fileCount: files.length,
@@ -690,6 +690,26 @@
             scannedVideoCount: files.length,
             sizeLimitBytes: limitBytes
         };
+    }
+
+    function isVideoFileNameLike(value) {
+        const text = String(value || '').trim().toLowerCase();
+        return VIDEO_EXTENSIONS.some((ext) => text.endsWith(ext));
+    }
+
+    function getDisplayFolderPath(config, snapshot) {
+        const candidates = [
+            snapshot?.folderPath,
+            snapshot?.folderName,
+            config?.videoFolderPath
+        ].map((value) => String(value || '').trim()).filter(Boolean);
+        const folder = candidates.find((value) => !isVideoFileNameLike(value));
+        return folder || '浏览器未暴露完整路径';
+    }
+
+    function getFolderConfigured(config, snapshot) {
+        const folder = getDisplayFolderPath(config, snapshot);
+        return Boolean(folder && folder !== '浏览器未暴露完整路径');
     }
 
     function createInput(id, placeholder) {
@@ -1305,7 +1325,7 @@
         const validFiles = files.filter(isValidResolvedVideoFile);
         state.liveFiles[productId] = validFiles;
         state.persistedFiles[productId] = validFiles;
-        const folderName = files[0]?.webkitRelativePath?.split('/')[0] || files[0]?.name || '';
+        const folderName = files[0]?.webkitRelativePath?.split('/')[0] || getFormEl('pcm-folder-path')?.value || '';
         const snapshot = {
             folderName,
             fileCount: validFiles.length,
@@ -1488,6 +1508,7 @@
         }
 
         configs.forEach((config, index) => {
+            const effectiveConfig = applyGlobalBatchConfig(config);
             const card = document.createElement('div');
             card.className = 'pcm-config-card';
 
@@ -1515,8 +1536,9 @@
             const summary = document.createElement('div');
             summary.className = 'pcm-config-card__summary';
             const snapshot = getSnapshotForProduct(config.productId);
-            const task = buildTask(config);
-            summary.textContent = `标题：${config.title || '未填写'} | 目录：${snapshot?.folderName || config.videoFolderPath || '未绑定'} | 本批：${task.videos.length}/${config.maxCount} | 大小：${formatBytes(task.totalSizeBytes)}/${config.maxSize}${config.maxSizeUnit}`;
+            const task = buildTask(effectiveConfig);
+            const folderPath = getDisplayFolderPath(config, snapshot);
+            summary.textContent = `标题：${config.title || '未填写'} | 文件夹：${folderPath} | 视频：${task.scannedVideoCount} 个 | 当前批次：${task.videos.length}/${effectiveConfig.maxCount} | 大小：${formatBytes(task.totalSizeBytes)}/${effectiveConfig.maxSize}${effectiveConfig.maxSizeUnit}`;
 
             const actions = document.createElement('div');
             actions.className = 'pcm-config-card__actions';
@@ -1627,8 +1649,8 @@
             const effectiveConfig = applyGlobalBatchConfig(config);
             const snapshot = getSnapshotForProduct(config.productId);
             const task = buildTask(effectiveConfig);
-            const folderPath = snapshot?.folderName || config.videoFolderPath || '未配置';
-            const configured = Boolean(snapshot?.folderName || config.videoFolderPath);
+            const folderPath = getDisplayFolderPath(config, snapshot);
+            const configured = getFolderConfigured(config, snapshot);
             const collapsed = state.cardCollapsedMap[config.productId] !== false;
 
             const card = document.createElement('div');
@@ -1656,7 +1678,7 @@
             title.textContent = `${index + 1}. 商品ID：${config.productId}`;
             const summary = document.createElement('div');
             summary.className = 'pcm-config-card__summary';
-            summary.textContent = `文件夹：${folderPath} | 状态：${configured ? '已配置' : '未配置'}`;
+            summary.textContent = `文件夹：${folderPath} | 视频：${task.scannedVideoCount} 个 | 当前批次：${task.videos.length}/${effectiveConfig.maxCount} | 状态：${configured ? '已配置' : '未配置'}`;
             info.appendChild(title);
             info.appendChild(summary);
             left.appendChild(info);
@@ -1682,6 +1704,7 @@
             meta.innerHTML = [
                 `<div><strong>商品ID：</strong>${config.productId || '未配置'}</div>`,
                 `<div><strong>视频文件夹路径：</strong>${folderPath}</div>`,
+                `<div><strong>视频总数：</strong>${task.scannedVideoCount} 个</div>`,
                 `<div><strong>配置状态：</strong>${configured ? '已配置' : '未配置'}</div>`,
                 `<div><strong>当前批次：</strong>${task.videos.length}/${effectiveConfig.maxCount}</div>`,
                 `<div><strong>批次上限：</strong>${effectiveConfig.maxSize}${effectiveConfig.maxSizeUnit}</div>`
