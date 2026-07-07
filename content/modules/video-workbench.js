@@ -31,7 +31,18 @@
             let currentUploadCompletePromise = null;
             let currentBatchExpectedCount = 0;
             const uploadAttemptState = new Map();
+            const executionLogs = [];
             const MEMORY_KEY = 'pdd_video_helper_memory';
+            const DELAY_CONFIG_STORAGE_KEY = 'pdd_video_workbench_delay_config';
+            const DELAY_CONFIG_IDS = [
+                'cfg-id-wait',
+                'cfg-title-sleep',
+                'cfg-declare-wait',
+                'cfg-modal-wait',
+                'cfg-cover-ready-wait',
+                'cfg-cover-publish-wait',
+                'cfg-loop-wait'
+            ];
             const PRODUCT_CONFIG_STORAGE_KEY = 'pdd_product_config_manager_configs';
             const PRODUCT_CONFIG_DB_NAME = 'pdd-product-config-manager';
             const PRODUCT_CONFIG_DB_VERSION = 2;
@@ -128,6 +139,41 @@
                 const val = parseInt(el.value, 10);
                 return Number.isNaN(val) ? defaultVal : val;
             };
+
+            function restoreDelayConfig() {
+                let saved = {};
+                try {
+                    saved = JSON.parse(localStorage.getItem(DELAY_CONFIG_STORAGE_KEY) || '{}');
+                } catch (error) {
+                    saved = {};
+                }
+                DELAY_CONFIG_IDS.forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (!el || saved[id] === undefined) return;
+                    el.value = saved[id];
+                });
+            }
+
+            function saveDelayConfig() {
+                const saved = {};
+                DELAY_CONFIG_IDS.forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    saved[id] = el.value;
+                });
+                localStorage.setItem(DELAY_CONFIG_STORAGE_KEY, JSON.stringify(saved));
+            }
+
+            function bindDelayConfigPersistence() {
+                restoreDelayConfig();
+                DELAY_CONFIG_IDS.forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    el.addEventListener('input', saveDelayConfig);
+                    el.addEventListener('change', saveDelayConfig);
+                });
+                saveDelayConfig();
+            }
 
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -476,12 +522,10 @@
                 const logList = document.getElementById('video-workbench-log-list');
                 if (!logList) return;
 
-                if (logList.children.length > 80) {
-                    logList.removeChild(logList.lastChild);
-                }
-
                 const now = new Date();
                 const time = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+                const normalizedMessage = normalizeExecutionLogMessage(msg);
+                executionLogs.push(`[${time}]${normalizedMessage}`);
 
                 const item = document.createElement('div');
                 item.className = `log-item log-${type}`;
@@ -501,13 +545,43 @@
 
                 const messageSpan = document.createElement('span');
                 messageSpan.style.color = color;
-                messageSpan.textContent = normalizeExecutionLogMessage(msg);
+                messageSpan.textContent = normalizedMessage;
 
                 item.appendChild(timeSpan);
                 item.appendChild(messageSpan);
                 logList.prepend(item);
                 logList.scrollTop = 0;
                 updateLogStatusCard({ logText: msg });
+            }
+
+            async function copyExecutionLogs() {
+                const text = executionLogs.join('\n');
+                if (!text) {
+                    updateStatus('暂无日志可复制');
+                    return;
+                }
+                try {
+                    await navigator.clipboard.writeText(text);
+                    updateStatus(`已复制 ${executionLogs.length} 条日志`);
+                } catch (error) {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.style.position = 'fixed';
+                    textarea.style.left = '-9999px';
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    textarea.remove();
+                    updateStatus(`已复制 ${executionLogs.length} 条日志`);
+                }
+            }
+
+            function clearExecutionLogs() {
+                executionLogs.length = 0;
+                const logList = document.getElementById('video-workbench-log-list');
+                if (logList) logList.innerHTML = '';
+                updateStatus('日志已清空');
+                updateLogStatusCard({ logText: '日志已清空' });
             }
 
             moduleApi.appendExecutionLog = function (message, type = 'info') {
@@ -1712,12 +1786,8 @@
                 transitionBatchState('COVER_PROCESSING', {
                     expectedCount: currentBatchExpectedCount
                 });
-                if (document.getElementById('task-chk-cover').checked) {
-                    const coverReady = await taskPubCover();
-                    if (!coverReady) return false;
-                } else {
-                    batchLifecycle.coverDoneCount = currentBatchExpectedCount;
-                }
+                const pipelineReady = await taskCoverAndPublishReadyVideos();
+                if (!pipelineReady) return false;
                 transitionBatchState('COVER_WAITING', {
                     expectedCount: currentBatchExpectedCount,
                     coverDoneCount: batchLifecycle.coverDoneCount
@@ -1727,12 +1797,6 @@
                 transitionBatchState('PUBLISHING', {
                     expectedCount: currentBatchExpectedCount
                 });
-                if (document.getElementById('cfg-pub-auto').checked) {
-                    const publishReady = await taskIndividualPublish();
-                    if (!publishReady) return false;
-                } else {
-                    batchLifecycle.publishedCount = currentBatchExpectedCount;
-                }
                 transitionBatchState('PUBLISH_WAITING', {
                     publishedCount: batchLifecycle.publishedCount,
                     expectedCount: currentBatchExpectedCount
@@ -2194,6 +2258,23 @@
                     font-size: 11px;
                     font-weight: bold;
                     background: #eee;
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 6px;
+                }
+                #${ROOT_ID} .ws-log-actions {
+                    display: flex;
+                    gap: 6px;
+                }
+                #${ROOT_ID} .ws-log-action-btn {
+                    border: 1px solid #d0d7de;
+                    background: #fff;
+                    color: #34495e;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 11px;
+                    cursor: pointer;
                 }
                 #${ROOT_ID} .log-body {
                     height: 320px;
@@ -2312,10 +2393,6 @@
                                 <option value="内容含营销信息">内容含营销信息</option>
                                 <option value="内容为转载">内容为转载</option>
                                 <option value="个人观点，仅供参考">个人观点，仅供参考</option>
-                                <option value="内容可能引人不适，请谨慎观看">内容可能引人不适，请谨慎观看</option>
-                                <option value="内容含有高危险行为，请勿模仿">内容含有高危险行为，请勿模仿</option>
-                                <option value="请理性适度消费">请理性适度消费</option>
-                                <option value="未成年人请在监护人指导下浏览">未成年人请在监护人指导下浏览</option>
                             </select>
                         </div>
                     </div>
@@ -2329,6 +2406,8 @@
                         <div class="ws-row"><span>标题录入间隔:</span><input type="number" class="ws-row-input" id="cfg-title-sleep" value="897"></div>
                         <div class="ws-row"><span>声明点击等待:</span><input type="number" class="ws-row-input" id="cfg-declare-wait" value="618"></div>
                         <div class="ws-row"><span>封面弹窗等待:</span><input type="number" class="ws-row-input" id="cfg-modal-wait" value="929"></div>
+                        <div class="ws-row"><span>封面点击前等待:</span><input type="number" class="ws-row-input" id="cfg-cover-ready-wait" value="1500"></div>
+                        <div class="ws-row"><span>封面后发布等待:</span><input type="number" class="ws-row-input" id="cfg-cover-publish-wait" value="1500"></div>
                         <div class="ws-row"><span>发布循环间隔:</span><input type="number" class="ws-row-input" id="cfg-loop-wait" value="967"></div>
                     </div>
 
@@ -2408,7 +2487,13 @@
                         </div>
                     </div>
                     <div class="ws-log-list-wrap">
-                        <div class="ws-log-list-header">执行日志</div>
+                        <div class="ws-log-list-header">
+                            <span>执行日志</span>
+                            <span class="ws-log-actions">
+                                <button type="button" class="ws-log-action-btn" id="video-workbench-copy-logs">复制全部</button>
+                                <button type="button" class="ws-log-action-btn" id="video-workbench-clear-logs">清空日志</button>
+                            </span>
+                        </div>
                     </div>
                 </div>
             `;
@@ -2416,12 +2501,13 @@
             const logStatusLabelEls = logTabPanel.querySelectorAll('.ws-log-status-label');
             const logHeaderLabelEl = logTabPanel.querySelector('.ws-label');
             const logListHeaderEl = logTabPanel.querySelector('.ws-log-list-header');
+            const logListTitleEl = logListHeaderEl?.querySelector('span');
             const logStatusValueEl = logTabPanel.querySelector('#video-workbench-log-status');
             if (logHeaderLabelEl) logHeaderLabelEl.textContent = '执行状态';
             if (logStatusLabelEls[0]) logStatusLabelEls[0].textContent = '当前商品ID';
             if (logStatusLabelEls[1]) logStatusLabelEls[1].textContent = '当前状态';
             if (logStatusLabelEls[2]) logStatusLabelEls[2].textContent = '当前批次';
-            if (logListHeaderEl) logListHeaderEl.textContent = '执行日志';
+            if (logListTitleEl) logListTitleEl.textContent = '执行日志';
             if (logStatusValueEl) logStatusValueEl.textContent = '等待';
             const logListWrap = logTabPanel.querySelector('.ws-log-list-wrap');
             if (logListWrap && logList) {
@@ -2881,6 +2967,137 @@
                 return verified;
             }
 
+            function collectCoverEditButtons() {
+                const rawBtns = Array.from(document.querySelectorAll('button, span')).filter((el) => {
+                    return isCoverEditText(el.innerText) &&
+                        el.offsetHeight > 0 &&
+                        !el.closest(`#${ROOT_ID}`) &&
+                        !el.dataset.done;
+                });
+                return rawBtns.filter((el) => {
+                    if (!isEnabledCoverEditTarget(el)) return false;
+                    const hasChildWithText = Array.from(el.querySelectorAll('*')).some((child) => isCoverEditText(child.innerText));
+                    return !hasChildWithText;
+                });
+            }
+
+            function isCoverEditText(text) {
+                const normalized = String(text || '').trim();
+                return normalized === '编辑封面' ||
+                    normalized === '设置封面' ||
+                    normalized === '更换封面' ||
+                    normalized.includes('编辑封面');
+            }
+
+            function isEnabledCoverEditTarget(el) {
+                if (!el || el.dataset.done === 'true') return false;
+                const button = el.closest('button, [role="button"]') || el;
+                return button.offsetHeight > 0 &&
+                    !button.disabled &&
+                    button.dataset.done !== 'true' &&
+                    button.getAttribute('aria-disabled') !== 'true' &&
+                    !String(button.className || '').includes('BTN_disabled');
+            }
+
+            function isUploadSuccessVideoItem(item) {
+                const text = getElementText(item);
+                return text.includes('视频上传成功') ||
+                    Boolean(item.querySelector('[class*="video-list_success"]'));
+            }
+
+            function getVisiblePublishItems() {
+                const detailItems = Array.from(document.querySelectorAll('div[class*="video-list_detail"]'))
+                    .filter((item) => item.offsetParent !== null && !item.closest?.(`#${ROOT_ID}`));
+                if (detailItems.length) {
+                    return detailItems.filter(isUploadSuccessVideoItem);
+                }
+                return Array.from(document.querySelectorAll('div[class*="video-list_singlePublish"]'))
+                    .filter((item) => item.offsetParent !== null && !item.closest?.(`#${ROOT_ID}`));
+            }
+
+            function collectUploadSuccessVideoCards() {
+                return Array.from(document.querySelectorAll('div[class*="video-list_detail"]'))
+                    .filter((item) => item.offsetParent !== null && !item.closest?.(`#${ROOT_ID}`) && isUploadSuccessVideoItem(item));
+            }
+
+            function collectReadyCoverTargets(expectedCount) {
+                return collectUploadSuccessVideoCards()
+                    .slice(0, expectedCount)
+                    .map((item) => ({ item, btn: getCoverButtonFromItem(item) }))
+                    .filter(({ item, btn }) => btn && item.dataset.pddCoverDone !== 'true');
+            }
+
+            function getCoverButtonFromItem(item) {
+                if (!item) return null;
+                const candidates = Array.from(item.querySelectorAll('button, [role="button"], span'))
+                    .filter((el) => isCoverEditText(el.innerText) &&
+                        el.offsetHeight > 0 &&
+                        !el.closest(`#${ROOT_ID}`) &&
+                        !el.dataset.done &&
+                        isEnabledCoverEditTarget(el));
+                return candidates.find((el) => {
+                    const hasChildWithText = Array.from(el.querySelectorAll('*')).some((child) => isCoverEditText(child.innerText));
+                    return !hasChildWithText;
+                }) || candidates[0] || null;
+            }
+
+            function getPublishButtonFromItem(item) {
+                const publishRoot = item?.querySelector?.('div[class*="video-list_singlePublish"]') || item;
+                const publishButtons = Array.from(publishRoot?.querySelectorAll?.('button') || [])
+                    .filter((btn) => btn.offsetParent !== null && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true');
+                return publishButtons.find((btn) => getElementText(btn) === '发布') ||
+                    publishButtons.find((btn) => getElementText(btn).includes('发布')) ||
+                    null;
+            }
+
+            function ensureImmediatePublishSelected(item) {
+                const publishSetting = Array.from(item?.querySelectorAll?.('[class*="PublishTimeSetting"], [data-testid="beast-core-radio"], label') || [])
+                    .find((el) => getElementText(el).includes('立即发布'));
+                if (publishSetting && publishSetting.getAttribute('data-checked') === 'false') {
+                    safeClick(publishSetting);
+                    addLog('[发布] 已选择立即发布', 'info');
+                }
+            }
+
+            async function confirmCoverForVideo(btn, videoIndex, total, modalWait, preClickWait = 0) {
+                addLog(`[等待封面确认] 视频 ${videoIndex + 1}/${total}`, 'info');
+                updateStatus(`[封面] ${videoIndex + 1}/${total}`);
+                const button = btn.closest?.('button, [role="button"]') || btn;
+                if (preClickWait > 0) {
+                    addLog(`[封面] 视频 ${videoIndex + 1}/${total} 点击前等待 ${preClickWait}ms`, 'info');
+                    await sleep(preClickWait);
+                }
+                btn.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                robustClick(btn);
+                if (modalWait > 0) {
+                    addLog(`[封面] 视频 ${videoIndex + 1}/${total} 弹窗操作等待 ${modalWait}ms`, 'info');
+                    await sleep(modalWait);
+                }
+                let confirm = await waitForCoverConfirmButton(10000);
+                if (!confirm && button !== btn) {
+                    robustClick(button);
+                    if (modalWait > 0) await sleep(modalWait);
+                    confirm = await waitForCoverConfirmButton(10000);
+                }
+                if (!confirm) {
+                    addLog(`[封面] 视频 ${videoIndex + 1} 未找到确认按钮，继续轮询`, 'error');
+                    document.body.click();
+                    return false;
+                }
+                robustClick(confirm);
+                const confirmed = await waitForCoverConfirmed(btn, 10000);
+                if (!confirmed) {
+                    addLog(`[封面] 视频 ${videoIndex + 1} 确认超时，继续轮询`, 'error');
+                    return false;
+                }
+                btn.dataset.done = 'true';
+                if (button && button !== btn) button.dataset.done = 'true';
+                coverState.uiConfirmed.add(videoIndex);
+                batchLifecycle.coverDoneCount = coverState.uiConfirmed.size;
+                addLog(`[封面] 视频 ${videoIndex + 1}/${total} 成功（已确认）`, 'success');
+                return true;
+            }
+
             async function taskPubCover() {
                 if (!canPublish()) {
                     console.log('COVER_BLOCKED_UPLOAD_NOT_FINISHED');
@@ -2893,49 +3110,156 @@
                 }
                 if (!document.getElementById('task-chk-cover').checked) return;
                 batchLifecycle.coverDoneCount = 0;
-                const rawBtns = Array.from(document.querySelectorAll('button, span')).filter((el) => {
-                    return el.innerText?.trim() === '编辑封面' &&
-                        el.offsetHeight > 0 &&
-                        !el.closest(`#${ROOT_ID}`) &&
-                        !el.dataset.done;
-                });
-                const btns = rawBtns.filter((el) => {
-                    const hasChildWithText = Array.from(el.querySelectorAll('*')).some((child) => child.innerText?.trim() === '编辑封面');
-                    return !hasChildWithText;
-                });
-                addLog(`开始确认封面：识别到 ${btns.length} 个视频`, 'info');
-                if (btns.length < currentBatchExpectedCount) {
-                    addLog(`[封面] 阻断：需要 ${currentBatchExpectedCount} 个，实际找到 ${btns.length} 个`, 'error');
-                    return false;
-                }
-                for (let i = 0; i < btns.length; i++) {
+                coverState.uiConfirmed.clear();
+                const expectedCount = currentBatchExpectedCount;
+                const configuredModalWait = getCfg('cfg-modal-wait', 1000);
+                const modalWait = Math.max(0, configuredModalWait);
+                const coverReadyWait = Math.max(0, getCfg('cfg-cover-ready-wait', 1500));
+                const maxCoverScanWait = Math.max(60000, expectedCount * Math.max(modalWait, 1000) * 4);
+                const startedAt = Date.now();
+                const retryAt = new WeakMap();
+                let lastReadyCount = -1;
+                addLog(`开始确认封面：等待 ${expectedCount} 个视频可编辑，封面弹窗操作等待 ${modalWait}ms`, 'info');
+
+                while (coverState.uiConfirmed.size < expectedCount && Date.now() - startedAt < maxCoverScanWait) {
                     if (!isRunning) return;
                     await checkPause();
-                    addLog(`[等待封面确认] 视频 ${i + 1}/${btns.length}`, 'info');
-                    updateStatus(`[封面] ${i + 1}/${btns.length}`);
-                    const btn = btns[i];
-                    btn.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    robustClick(btn);
-                    const confirm = await waitForCoverConfirmButton();
-                    if (confirm) {
-                        robustClick(confirm);
-                        const confirmed = await waitForCoverConfirmed(btn);
-                        if (!confirmed) {
-                            addLog(`[封面] 视频 ${i + 1} 确认超时`, 'error');
-                            return false;
-                        }
-                        coverState.uiConfirmed.add(i);
-                        addLog(`[封面] 视频 ${i + 1}/${btns.length} 成功（已确认）`, 'success');
-                        btn.dataset.done = 'true';
-                        batchLifecycle.coverDoneCount = i + 1;
-                        await sleep(1000);
+                    const readyBtns = collectCoverEditButtons();
+                    if (readyBtns.length !== lastReadyCount) {
+                        addLog(`[封面] 已确认 ${coverState.uiConfirmed.size}/${expectedCount}，当前可编辑 ${readyBtns.length} 个`, 'info');
+                        lastReadyCount = readyBtns.length;
+                    }
+                    const now = Date.now();
+                    const btn = readyBtns.find((item) => (retryAt.get(item) || 0) <= now);
+                    if (!btn) {
+                        await sleep(500);
+                        continue;
+                    }
+                    const videoIndex = coverState.uiConfirmed.size;
+                    const confirmed = await confirmCoverForVideo(btn, videoIndex, expectedCount, modalWait, coverReadyWait);
+                    if (confirmed) {
+                        await sleep(300);
                     } else {
-                        addLog(`[封面] 视频 ${i + 1} 未找到确认按钮`, 'error');
-                        document.body.click();
-                        return false;
+                        retryAt.set(btn, Date.now() + 3000);
                     }
                 }
-                return true;
+                const completed = coverState.uiConfirmed.size >= expectedCount;
+                if (!completed) {
+                    addLog(`[封面] 等待可编辑封面超时：${coverState.uiConfirmed.size}/${expectedCount}`, 'error');
+                }
+                return completed;
+            }
+
+            async function taskCoverAndPublishReadyVideos() {
+                if (!canPublish()) {
+                    console.log('COVER_PUBLISH_BLOCKED_UPLOAD_NOT_FINISHED');
+                    return false;
+                }
+                assertBatchState('COVER_PROCESSING');
+                const expectedCount = currentBatchExpectedCount;
+                const coverEnabled = Boolean(document.getElementById('task-chk-cover')?.checked);
+                const publishEnabled = Boolean(document.getElementById('cfg-pub-auto')?.checked);
+                const configuredModalWait = getCfg('cfg-modal-wait', 1000);
+                const modalWait = Math.max(0, configuredModalWait);
+                const coverReadyWait = Math.max(0, getCfg('cfg-cover-ready-wait', 1500));
+                const coverPublishWait = Math.max(0, getCfg('cfg-cover-publish-wait', 1500));
+                const loopWait = Math.max(0, getCfg('cfg-loop-wait', 1000));
+                const startedAt = Date.now();
+                const maxPipelineWait = Math.max(600000, expectedCount * 45000);
+                const coverRetryAt = new WeakMap();
+                let lastSummary = '';
+
+                if (!coverEnabled) {
+                    batchLifecycle.coverDoneCount = expectedCount;
+                    coverState.uiConfirmed = new Set(Array.from({ length: expectedCount }, (_, index) => index));
+                } else {
+                    batchLifecycle.coverDoneCount = 0;
+                    coverState.uiConfirmed.clear();
+                }
+
+                if (!publishEnabled) {
+                    batchLifecycle.publishedCount = expectedCount;
+                    publishState.successConfirmed = new Set(Array.from({ length: expectedCount }, (_, index) => index));
+                    publishState.uiConfirmed = new Set(Array.from({ length: expectedCount }, (_, index) => index));
+                }
+
+                addLog(`[封面发布] 逐视频闭环启动：目标 ${expectedCount} 个，封面点击前等待 ${coverReadyWait}ms，封面弹窗操作等待 ${modalWait}ms，封面后发布等待 ${coverPublishWait}ms，发布间隔 ${loopWait}ms`, 'info');
+
+                while ((coverState.uiConfirmed.size < expectedCount || publishState.uiConfirmed.size < expectedCount) &&
+                    Date.now() - startedAt < maxPipelineWait) {
+                    if (!isRunning) return false;
+                    await checkPause();
+                    let progressed = false;
+                    const videoItems = collectUploadSuccessVideoCards().slice(0, expectedCount);
+                    const readyCoverTargets = coverEnabled ? collectReadyCoverTargets(expectedCount) : [];
+                    const summary = `上传成功视频=${videoItems.length}/${expectedCount} 可封面=${coverEnabled ? readyCoverTargets.length : expectedCount} 封面=${coverState.uiConfirmed.size}/${expectedCount} 发布=${publishState.uiConfirmed.size}/${expectedCount}`;
+                    if (summary !== lastSummary) {
+                        addLog(`[封面发布] ${summary}`, 'info');
+                        lastSummary = summary;
+                    }
+
+                    for (const item of videoItems) {
+                        if (!isRunning) return false;
+                        await checkPause();
+
+                        if (coverEnabled && item.dataset.pddCoverDone !== 'true') {
+                            const coverBtn = getCoverButtonFromItem(item);
+                            if (coverBtn && (coverRetryAt.get(coverBtn) || 0) <= Date.now()) {
+                                const coverIndex = coverState.uiConfirmed.size;
+                                const confirmed = await confirmCoverForVideo(coverBtn, coverIndex, expectedCount, modalWait, coverReadyWait);
+                                if (confirmed) {
+                                    item.dataset.pddCoverDone = 'true';
+                                    item.dataset.pddPublishIndex = String(coverIndex);
+                                    progressed = true;
+                                    await sleep(300);
+                                } else {
+                                    coverRetryAt.set(coverBtn, Date.now() + 3000);
+                                }
+                            }
+                        }
+
+                        const coverReadyForPublish = !coverEnabled || item.dataset.pddCoverDone === 'true';
+                        const publishIndex = Number.isFinite(Number(item.dataset.pddPublishIndex))
+                            ? Number(item.dataset.pddPublishIndex)
+                            : publishState.uiConfirmed.size;
+                        if (publishEnabled && coverReadyForPublish && item.dataset.pddPublishDone !== 'true' && !publishState.clicked.has(publishIndex)) {
+                            const pubBtn = getPublishButtonFromItem(item);
+                            if (!pubBtn) continue;
+                            if (coverPublishWait > 0 && item.dataset.pddCoverPublishWaitDone !== 'true') {
+                                addLog(`[发布] 视频 ${publishIndex + 1}/${expectedCount} 封面确认后等待 ${coverPublishWait}ms`, 'info');
+                                item.dataset.pddCoverPublishWaitDone = 'true';
+                                await sleep(coverPublishWait);
+                            }
+                            updateStatus(`正在发布第 ${publishIndex + 1}/${expectedCount} 个`);
+                            addLog(`[发布] 视频 ${publishIndex + 1}/${expectedCount} 开始`, 'info');
+                            publishState.clicked.add(publishIndex);
+                            ensureImmediatePublishSelected(item);
+                            safeClick(pubBtn);
+                            const published = await waitForPublishSuccess(item, publishIndex + 1);
+                            if (!published) {
+                                addLog(`[发布] 视频 ${publishIndex + 1}/${expectedCount} 发布成功未确认`, 'error');
+                                return false;
+                            }
+                            item.dataset.pddPublishDone = 'true';
+                            batchLifecycle.publishedCount = publishState.uiConfirmed.size;
+                            progressed = true;
+                            if (loopWait > 0) {
+                                addLog(`[发布] 等待 ${loopWait}ms 后继续下一条`, 'info');
+                                await sleep(loopWait);
+                            }
+                        }
+                    }
+
+                    if (!progressed) {
+                        await sleep(500);
+                    }
+                }
+
+                const completed = coverState.uiConfirmed.size >= expectedCount && publishState.uiConfirmed.size >= expectedCount;
+                if (!completed) {
+                    addLog(`[封面发布] 等待超时：封面 ${coverState.uiConfirmed.size}/${expectedCount}，发布 ${publishState.uiConfirmed.size}/${expectedCount}`, 'error');
+                }
+                return completed;
             }
 
             async function waitForCoverConfirmButton(timeout = 10000) {
@@ -2991,16 +3315,18 @@
                     const publishButtonState = getPublishButtonState(expectedCount);
                     const pendingCoverUi = hasPendingCoverUi();
                     const allCoverUIConfirmed = coverState.uiConfirmed.size === expectedCount;
+                    const publishAlreadyHandled = publishState.clicked.size > 0 || publishState.uiConfirmed.size === expectedCount;
+                    const publishButtonsReadyOrHandled = publishButtonState.allPublishButtonsConfirmed || publishAlreadyHandled;
                     const passed = coverDoneCount >= expectedCount &&
                         allCoverUIConfirmed &&
-                        publishButtonState.allPublishButtonsConfirmed &&
+                        publishButtonsReadyOrHandled &&
                         !pendingCoverUi;
                     console.log('COVER_WAIT_STATE', {
                         batchId,
                         coverDoneCount,
                         expectedCount,
                         allCoverUIConfirmed,
-                        allPublishButtonsConfirmed: publishButtonState.allPublishButtonsConfirmed,
+                        allPublishButtonsConfirmed: publishButtonsReadyOrHandled,
                         pendingCoverUi
                     });
                     return passed;
@@ -3050,7 +3376,7 @@
             }
 
             function clickPublishConfirmIfPresent() {
-                const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .ant-modal, .el-dialog, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"]'))
+                const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .ant-modal, .el-dialog, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [data-testid*="modal"], [class*="MDL_"]'))
                     .filter((dialog) => isVisibleElement(dialog) && !dialog.closest?.(`#${ROOT_ID}`));
                 for (const dialog of dialogs) {
                     const dialogText = getElementText(dialog);
@@ -3078,18 +3404,24 @@
                 const itemText = item?.innerText || '';
                 const pageText = document.body?.innerText || '';
                 const loading = getVisibleUploadLoadingNodes().length;
-                const hasSuccessText = /发布成功|已发布|提交成功|审核中/.test(itemText);
-                const hasGlobalSuccessText = /发布成功|提交成功/.test(pageText);
-                const publishButtonVisible = Array.from(item?.querySelectorAll?.('button') || [])
-                    .some((btn) => btn.innerText?.includes('发布') && btn.offsetParent !== null && !btn.disabled);
+                const hasSuccessText = /发布成功|已发布|提交成功|审核中|审核|发布完成/.test(itemText);
+                const hasGlobalSuccessText = /发布成功|提交成功|已发布|审核中|发布完成/.test(pageText);
+                const pubBtn = getPublishButtonFromItem(item);
+                const publishButtonVisible = Boolean(pubBtn);
+                const publishButtonDisabled = Boolean(pubBtn && (pubBtn.disabled || pubBtn.getAttribute('aria-disabled') === 'true'));
+                const itemGone = !document.body.contains(item);
                 const noPendingUI = !hasPendingUiState();
+                const explicitSuccess = hasSuccessText || hasGlobalSuccessText;
                 return {
                     hasSuccessText,
                     hasGlobalSuccessText,
                     publishButtonVisible,
+                    publishButtonDisabled,
+                    itemGone,
+                    explicitSuccess,
                     loading,
                     noPendingUI,
-                    uiStable: hasSuccessText && noPendingUI && loading === 0
+                    uiStable: explicitSuccess && noPendingUI && loading === 0
                 };
             }
 
@@ -3105,7 +3437,7 @@
                         addLog(`[发布] 视频 ${videoIndex + 1}/${total} 已点击确认弹窗：${confirmClicked}`, 'info');
                     }
                     const snapshot = getPublishSuccessSnapshot(item);
-                    if (snapshot.hasSuccessText) {
+                    if (snapshot.explicitSuccess) {
                         successConfirmed = true;
                         publishState.successConfirmed.add(videoIndex);
                     }
@@ -3302,6 +3634,7 @@
                     return false;
                 }
                 addLog(`检测到 ${videoItems.length} 个视频，开始逐一发布`, 'info');
+                const loopWait = Math.max(0, getCfg('cfg-loop-wait', 1000));
                 for (let i = 0; i < videoItems.length; i++) {
                     if (!isRunning) return false;
                     await checkPause();
@@ -3315,13 +3648,18 @@
                         updateStatus(`正在发布第 ${i + 1}/${videoItems.length} 个`);
                         addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 开始`, 'info');
                         publishState.clicked.add(i);
-                        robustClick(pubBtn);
+                        ensureImmediatePublishSelected(item);
+                        safeClick(pubBtn);
                         const published = await waitForPublishSuccess(item, i + 1);
                         if (!published) {
                             addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 发布成功未确认`, 'error');
                             return false;
                         }
                         batchLifecycle.publishedCount = i + 1;
+                        if (i < videoItems.length - 1 && loopWait > 0) {
+                            addLog(`[发布] 等待 ${loopWait}ms 后继续下一条`, 'info');
+                            await sleep(loopWait);
+                        }
                     } else {
                         addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 未找到发布按钮`, 'error');
                         return false;
@@ -3436,6 +3774,7 @@
             bindToggle('label-delay-config', 'content-delay-config', 'arrow-delay-config');
             bindToggle('label-declare-config', 'content-declare-config', 'arrow-declare-config');
             bindToggle('video-workbench-perf-toggle', 'video-workbench-perf-body', 'video-workbench-perf-arrow');
+            bindDelayConfigPersistence();
 
             document.getElementById('video-workbench-log-toggle').onclick = () => {
                 const body = document.getElementById('video-workbench-log-list');
@@ -3443,6 +3782,8 @@
                 body.style.display = isHidden ? 'block' : 'none';
                 document.getElementById('video-workbench-log-arrow').textContent = isHidden ? '▲' : '▼';
             };
+            document.getElementById('video-workbench-copy-logs')?.addEventListener('click', copyExecutionLogs);
+            document.getElementById('video-workbench-clear-logs')?.addEventListener('click', clearExecutionLogs);
 
             document.getElementById('pub-id').oninput = (e) => {
                 const memory = JSON.parse(localStorage.getItem(MEMORY_KEY) || '{}');
