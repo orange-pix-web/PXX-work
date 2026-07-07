@@ -1756,7 +1756,15 @@
             info.className = 'pcm-config-card__info';
             const title = document.createElement('div');
             title.className = 'pcm-config-card__title';
-            title.textContent = `${index + 1}. 商品ID：${config.productId}`;
+            const productIdTitle = document.createElement('span');
+            productIdTitle.textContent = `${index + 1}. 商品ID：${config.productId}`;
+            const titleText = String(config.title || '').replace(/\s+/g, ' ').trim();
+            const titleSnippet = document.createElement('span');
+            titleSnippet.className = 'pcm-config-card__title-snippet';
+            titleSnippet.textContent = `标题：${titleText ? titleText.slice(0, 8) : '未填写'}`;
+            titleSnippet.title = titleText || '未填写标题';
+            title.appendChild(productIdTitle);
+            title.appendChild(titleSnippet);
             const summary = document.createElement('div');
             summary.className = 'pcm-config-card__summary';
             summary.textContent = `文件夹：${folderPath} | 视频：${task.scannedVideoCount} 个 | 当前批次：${task.videos.length}/${effectiveConfig.maxCount} | 状态：${statusText}`;
@@ -2144,10 +2152,22 @@
                 border-top: 1px solid #e5e7eb;
             }
             #${ROOT_ID} .pcm-config-card__title {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                flex-wrap: wrap;
                 font-size: 12px;
                 font-weight: 700;
                 color: #1f2937;
                 margin-bottom: 4px;
+            }
+            #${ROOT_ID} .pcm-config-card__title-snippet {
+                max-width: 132px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                font-weight: 600;
+                color: #64748b;
             }
             #${ROOT_ID} .pcm-empty {
                 padding: 8px;

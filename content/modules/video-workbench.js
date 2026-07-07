@@ -461,6 +461,13 @@
                 return true;
             }
 
+            function clickPublishButtonOnce(el) {
+                if (!el) return false;
+                el.scrollIntoView?.({ block: 'center', behavior: 'auto' });
+                robustClick(el);
+                return true;
+            }
+
             function getCurrentUrl() {
                 return window.location?.href || '';
             }
@@ -1377,6 +1384,25 @@
                 }
                 timerMark('upload_ready');
 
+                for (const target of uploadTargets.inputs) {
+                    try {
+                        const input = target.element;
+                        const injectedCount = injectFilesIntoInput(input, files);
+                        if (injectedCount > 0) {
+                            addLog(`已优先注入上传控件：${target.type} / input.files=${injectedCount}`, 'info');
+                            const result = await waitForUploadAcceptance(files.length);
+                            emitUploadSuccessCheck(files.length, result.accepted, `${target.type}-input-fast`);
+                            if (result.accepted) {
+                                addLog(`上传控件已接受文件：${result.source} / ${result.matchedCount} 个`, 'success');
+                                timerEnd('uploadInit', 'uploadInit');
+                                return true;
+                            }
+                        }
+                    } catch (error) {
+                        addLog(`上传控件优先注入失败：${error?.message || error}`, 'error');
+                    }
+                }
+
                 for (const target of uploadTargets.dropZones) {
                     try {
                         const zone = target.element;
@@ -1827,7 +1853,7 @@
                     resetBatchLifecycle(batchId);
                     console.log('BATCH_START', i);
                     const scanned = await scanFolderFiles(productId, config, {
-                        force: true,
+                        force: false,
                         batchId
                     });
                     if (!scanned?.files?.length) {
@@ -2149,6 +2175,22 @@
                 #${ROOT_ID} .ws-tab-panel.active {
                     display: block;
                 }
+                #${ROOT_ID} .ws-legacy-publish-tab,
+                #${ROOT_ID} .ws-legacy-publish-panel {
+                    position: absolute !important;
+                    width: 1px !important;
+                    height: 1px !important;
+                    min-width: 0 !important;
+                    min-height: 0 !important;
+                    padding: 0 !important;
+                    margin: 0 !important;
+                    border: 0 !important;
+                    overflow: hidden !important;
+                    clip: rect(0 0 0 0) !important;
+                    clip-path: inset(50%) !important;
+                    pointer-events: none !important;
+                    opacity: 0 !important;
+                }
                 #${ROOT_ID} .ws-log-tab {
                     display: grid;
                     gap: 10px;
@@ -2365,17 +2407,70 @@
             panel.dataset.pddModule = 'video-workbench';
             panel.innerHTML = `
                 <div class="ws-header">
-                    <span id="video-workbench-title">视频工作台 V15.1</span>
+                    <span id="video-workbench-title">视频工作台 V0.2.0</span>
                     <div>
                         <span id="video-workbench-close" style="cursor:pointer; font-size: 18px; line-height: 1;">×</span>
                     </div>
                 </div>
                 <div class="ws-tabs" id="video-workbench-tabs">
-                    <button type="button" class="ws-tab active" data-tab="publish">发布配置</button>
+                    <button type="button" class="ws-tab active" data-tab="manual">手动发布</button>
+                    <button type="button" class="ws-tab ws-legacy-publish-tab" data-tab="publish" tabindex="-1" aria-hidden="true">发布配置</button>
                     <button type="button" class="ws-tab" data-tab="product">商品配置</button>
                     <button type="button" class="ws-tab" data-tab="logs">执行日志</button>
                 </div>
-                <div class="ws-body ws-tab-panel active" id="video-workbench-tab-publish">
+                <div class="ws-body ws-tab-panel active" id="video-workbench-tab-manual">
+                    <input type="text" class="ws-input" id="manual-pub-id" placeholder="输入商品 ID...">
+                    <textarea class="ws-input" id="manual-pub-title" style="height:40px; resize:none;" placeholder="输入标题..."></textarea>
+
+                    <span class="ws-label collapsible" id="label-manual-declare-config">
+                        <span>内容声明设置</span>
+                        <span id="arrow-manual-declare-config">▼</span>
+                    </span>
+                    <div class="collapsible-content collapsed" id="content-manual-declare-config">
+                        <div class="ws-row" style="padding: 5px 0;">
+                            <span>选择声明:</span>
+                            <select class="ws-input" id="manual-cfg-declare-type" style="width:220px; margin:0;">
+                                <option value="内容无需标注（作品不含AI生成、虚构、转载及营销等信息）" selected>内容无需标注（作品不含AI生成、虚构、转载及营销等信息）</option>
+                                <option value="含AI生成内容">含AI生成内容</option>
+                                <option value="含虚构演绎内容">含虚构演绎内容</option>
+                                <option value="内容含营销信息">内容含营销信息</option>
+                                <option value="内容为转载">内容为转载</option>
+                                <option value="个人观点，仅供参考">个人观点，仅供参考</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <span class="ws-label collapsible" id="label-manual-delay-config" style="margin-top:8px;">
+                        <span>延时参数（毫秒）</span>
+                        <span id="arrow-manual-delay-config">▼</span>
+                    </span>
+                    <div class="collapsible-content collapsed" id="content-manual-delay-config">
+                        <div class="ws-row"><span>ID 填充间隔:</span><input type="number" class="ws-row-input" id="manual-cfg-id-wait" value="983"></div>
+                        <div class="ws-row"><span>标题录入间隔:</span><input type="number" class="ws-row-input" id="manual-cfg-title-sleep" value="897"></div>
+                        <div class="ws-row"><span>声明点击等待:</span><input type="number" class="ws-row-input" id="manual-cfg-declare-wait" value="618"></div>
+                        <div class="ws-row"><span>封面弹窗等待:</span><input type="number" class="ws-row-input" id="manual-cfg-modal-wait" value="929"></div>
+                        <div class="ws-row"><span>封面点击前等待:</span><input type="number" class="ws-row-input" id="manual-cfg-cover-ready-wait" value="1500"></div>
+                        <div class="ws-row"><span>封面后发布等待:</span><input type="number" class="ws-row-input" id="manual-cfg-cover-publish-wait" value="1500"></div>
+                        <div class="ws-row"><span>发布循环间隔:</span><input type="number" class="ws-row-input" id="manual-cfg-loop-wait" value="967"></div>
+                    </div>
+
+                    <div class="ws-row" style="margin-top:8px; border-top:1px dotted #ccc; padding-top:8px;">
+                        <span style="color:#2980b9; font-weight:bold;">任务结束后逐个发布:</span>
+                        <input type="checkbox" id="manual-cfg-pub-auto" checked>
+                    </div>
+
+                    <span class="ws-label" style="border-left-color: #e67e22; margin-top:8px;">任务勾选</span>
+                    <div class="task-config-row">
+                        <label class="task-config-item"><input type="checkbox" id="manual-task-chk-id" checked> 填 ID</label>
+                        <label class="task-config-item"><input type="checkbox" id="manual-task-chk-title" checked> 标题</label>
+                        <label class="task-config-item"><input type="checkbox" id="manual-task-chk-declare" checked> 声明</label>
+                        <label class="task-config-item"><input type="checkbox" id="manual-task-chk-cover" checked> 封面</label>
+                    </div>
+
+                    <button class="ws-btn btn-run" id="video-workbench-manual-start">开始</button>
+                </div>
+
+                <div class="ws-body ws-tab-panel ws-legacy-publish-panel" id="video-workbench-tab-publish" aria-hidden="true">
                     <input type="text" class="ws-input" id="pub-id" placeholder="输入商品 ID（自动关联历史标题）...">
                     <textarea class="ws-input" id="pub-title" style="height:40px; resize:none;" placeholder="输入标题..."></textarea>
 
@@ -2517,13 +2612,172 @@
                 logPanel.style.display = 'none';
             }
 
-            let activeTab = 'publish';
+            const MANUAL_TO_LEGACY_IDS = {
+                'manual-pub-id': 'pub-id',
+                'manual-pub-title': 'pub-title',
+                'manual-cfg-declare-type': 'cfg-declare-type',
+                'manual-cfg-id-wait': 'cfg-id-wait',
+                'manual-cfg-title-sleep': 'cfg-title-sleep',
+                'manual-cfg-declare-wait': 'cfg-declare-wait',
+                'manual-cfg-modal-wait': 'cfg-modal-wait',
+                'manual-cfg-cover-ready-wait': 'cfg-cover-ready-wait',
+                'manual-cfg-cover-publish-wait': 'cfg-cover-publish-wait',
+                'manual-cfg-loop-wait': 'cfg-loop-wait',
+                'manual-cfg-pub-auto': 'cfg-pub-auto',
+                'manual-task-chk-id': 'task-chk-id',
+                'manual-task-chk-title': 'task-chk-title',
+                'manual-task-chk-declare': 'task-chk-declare',
+                'manual-task-chk-cover': 'task-chk-cover'
+            };
+
+            function syncElementValue(source, target, emit = true) {
+                if (!source || !target) return;
+                if (source.type === 'checkbox') {
+                    target.checked = source.checked;
+                } else {
+                    target.value = source.value;
+                }
+                if (emit) {
+                    ['input', 'change'].forEach((eventName) => {
+                        target.dispatchEvent(new Event(eventName, { bubbles: true }));
+                    });
+                }
+            }
+
+            function syncManualConfigToLegacy() {
+                Object.entries(MANUAL_TO_LEGACY_IDS).forEach(([manualId, legacyId]) => {
+                    syncElementValue(document.getElementById(manualId), document.getElementById(legacyId));
+                });
+            }
+
+            function syncLegacyConfigToManual() {
+                Object.entries(MANUAL_TO_LEGACY_IDS).forEach(([manualId, legacyId]) => {
+                    syncElementValue(document.getElementById(legacyId), document.getElementById(manualId), false);
+                });
+            }
+
+            function bindManualConfigBridge() {
+                syncLegacyConfigToManual();
+                Object.keys(MANUAL_TO_LEGACY_IDS).forEach((manualId) => {
+                    const el = document.getElementById(manualId);
+                    if (!el) return;
+                    const sync = () => syncManualConfigToLegacy();
+                    el.addEventListener('input', sync);
+                    el.addEventListener('change', sync);
+                });
+            }
+
+            function collectManualExistingVideoCards() {
+                return Array.from(document.querySelectorAll('div[class*="video-list_detail"]'))
+                    .filter((item) => item.offsetParent !== null && !item.closest?.(`#${ROOT_ID}`));
+            }
+
+            function getManualExistingVideoCount() {
+                const cards = collectManualExistingVideoCards().length;
+                const titleTargets = collectTitleTargets().length;
+                const declarationTargets = collectDeclarationTargets().length;
+                const publishButtons = Array.from(document.querySelectorAll('div[class*="video-list_singlePublish"]'))
+                    .filter((el) => el.offsetParent !== null && !el.closest?.(`#${ROOT_ID}`)).length;
+                return Math.max(cards, titleTargets, declarationTargets, publishButtons, collectUploadSuccessVideoCards().length);
+            }
+
+            function prepareManualExistingVideoBatch(expectedCount) {
+                const batchId = `manual-${Date.now()}`;
+                resetBatchLifecycle(batchId, expectedCount);
+                collectManualExistingVideoCards().slice(0, expectedCount).forEach((item) => {
+                    delete item.dataset.pddCoverDone;
+                    delete item.dataset.pddPublishDone;
+                    delete item.dataset.pddPublishIndex;
+                    delete item.dataset.pddCoverPublishWaitDone;
+                });
+                currentBatchExpectedCount = expectedCount;
+                currentUploadCompletePromise = null;
+                isBatchUploading = false;
+                uploadFinished = true;
+                publishLocked = false;
+                batchLifecycle.state = 'UPLOAD_COMPLETED';
+                batchLifecycle.uploadCompleted = true;
+                batchLifecycle.expectedCount = expectedCount;
+                batchExitGuard.upload = true;
+                setPhase('FILL_PHASE');
+                updateStatus('手动发布接管当前页面视频');
+                addLog(`[手动发布] 已接管当前页面 ${expectedCount} 个视频，不执行扫描/上传/切批/导航`, 'info');
+            }
+
+            async function runManualExistingVideoFlow(startButton) {
+                if (START_LOCK) {
+                    addLog('[START_LOCK] 启动流程已在执行，忽略重复触发', 'info');
+                    return;
+                }
+                syncManualConfigToLegacy();
+                const tasks = ['task-chk-id', 'task-chk-title', 'task-chk-declare', 'task-chk-cover'];
+                if (!tasks.some((task) => document.getElementById(task).checked)) {
+                    alert('请至少勾选一个任务！');
+                    return;
+                }
+
+                const productId = document.getElementById('pub-id')?.value.trim();
+                const title = document.getElementById('pub-title')?.value || '';
+                if (!productId) {
+                    addLog('[手动发布] 请先输入商品 ID', 'error');
+                    return;
+                }
+
+                const expectedCount = getManualExistingVideoCount();
+                if (!expectedCount) {
+                    addLog('[手动发布] 当前页面未检测到视频卡片，请先在平台上传视频', 'error');
+                    return;
+                }
+
+                isRunning = true;
+                isPaused = false;
+                START_LOCK = true;
+                startButton.disabled = true;
+                setControlsVisible(true);
+                resetPauseButton();
+                resetStartupPerf();
+
+                let flowSucceeded = false;
+                try {
+                    const memory = JSON.parse(localStorage.getItem(MEMORY_KEY) || '{}');
+                    memory[productId] = title;
+                    localStorage.setItem(MEMORY_KEY, JSON.stringify(memory));
+                    prepareManualExistingVideoBatch(expectedCount);
+                    const fillReady = await runFillPhase();
+                    if (!fillReady) {
+                        addLog('[手动发布] 信息填充未完成，流程已阻断', 'error');
+                        return;
+                    }
+                    const publishReady = await runPublishPhase();
+                    if (!publishReady) {
+                        addLog('[手动发布] 封面或发布未完成，流程已阻断', 'error');
+                        return;
+                    }
+                    flowSucceeded = true;
+                    addLog('[手动发布] 当前页面视频处理完成', 'success');
+                } catch (error) {
+                    console.error('VIDEO_WORKBENCH_MANUAL_FLOW_ERROR', error);
+                    addLog(`[手动发布] 执行失败：${error?.message || error}`, 'error');
+                } finally {
+                    isRunning = false;
+                    isPaused = false;
+                    START_LOCK = false;
+                    startButton.disabled = false;
+                    setControlsVisible(true);
+                    resetPauseButton();
+                    updateStatus(flowSucceeded ? '手动发布流程完成' : '手动发布流程失败');
+                }
+            }
+
+            let activeTab = 'manual';
 
             const switchTab = (tabName) => {
                 activeTab = tabName;
                 panel.querySelectorAll('.ws-tab').forEach((tabButton) => {
                     tabButton.classList.toggle('active', tabButton.dataset.tab === tabName);
                 });
+                if (tabName === 'manual') syncLegacyConfigToManual();
+                panel.querySelector('#video-workbench-tab-manual')?.classList.toggle('active', tabName === 'manual');
                 panel.querySelector('#video-workbench-tab-publish')?.classList.toggle('active', tabName === 'publish');
                 panel.querySelector('#video-workbench-tab-product')?.classList.toggle('active', tabName === 'product');
                 panel.querySelector('#video-workbench-tab-logs')?.classList.toggle('active', tabName === 'logs');
@@ -3041,7 +3295,58 @@
                 }) || candidates[0] || null;
             }
 
+            function getVideoItemWrap(item) {
+                return item?.closest?.('div[class*="video-list_itemWrap"]') || item;
+            }
+
+            function getPublishRootFromItem(item) {
+                const wrap = getVideoItemWrap(item);
+                return item?.querySelector?.('div[class*="video-list_singlePublish"]') ||
+                    wrap?.querySelector?.('div[class*="video-list_singlePublish"]') ||
+                    item;
+            }
+
+            function isPublishText(text) {
+                return /发布|鍙戝竷/.test(text || '');
+            }
+
+            function isPublishedText(text) {
+                return /已发布|宸插彂甯/.test(text || '');
+            }
+
+            function isPublishingText(text) {
+                return /发布中|鍙戝竷涓/.test(text || '');
+            }
+
+            function getPublishButtonUiState(item) {
+                const publishRoot = getPublishRootFromItem(item);
+                const buttons = Array.from(publishRoot?.querySelectorAll?.('button') || [])
+                    .filter((btn) => btn.offsetParent !== null);
+                const publishButtons = buttons
+                    .map((btn) => ({
+                        btn,
+                        text: getElementText(btn),
+                        disabled: Boolean(btn.disabled || btn.getAttribute('aria-disabled') === 'true')
+                    }))
+                    .filter(({ text }) => isPublishText(text) || isPublishedText(text) || isPublishingText(text));
+                const published = publishButtons.find(({ text }) => isPublishedText(text));
+                const publishing = publishButtons.find(({ text }) => isPublishingText(text));
+                const clickable = publishButtons.find(({ text, disabled }) =>
+                    isPublishText(text) && !isPublishedText(text) && !isPublishingText(text) && !disabled
+                );
+                return {
+                    buttons: publishButtons,
+                    button: clickable?.btn || null,
+                    text: (published || publishing || clickable || publishButtons[0])?.text || '',
+                    isPublished: Boolean(published),
+                    isPublishing: Boolean(publishing),
+                    isDisabled: Boolean((published || publishing || clickable || publishButtons[0])?.disabled),
+                    hasClickablePublish: Boolean(clickable)
+                };
+            }
+
             function getPublishButtonFromItem(item) {
+                return getPublishButtonUiState(item).button;
                 const publishRoot = item?.querySelector?.('div[class*="video-list_singlePublish"]') || item;
                 const publishButtons = Array.from(publishRoot?.querySelectorAll?.('button') || [])
                     .filter((btn) => btn.offsetParent !== null && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true');
@@ -3088,6 +3393,11 @@
                 const confirmed = await waitForCoverConfirmed(btn, 10000);
                 if (!confirmed) {
                     addLog(`[封面] 视频 ${videoIndex + 1} 确认超时，继续轮询`, 'error');
+                    return false;
+                }
+                const thumbnailReady = await waitForCoverThumbnailReady(btn, Math.max(15000, modalWait + 10000));
+                if (!thumbnailReady) {
+                    addLog(`[封面] 视频 ${videoIndex + 1} 缩略图未确认，继续轮询`, 'error');
                     return false;
                 }
                 btn.dataset.done = 'true';
@@ -3234,7 +3544,7 @@
                             addLog(`[发布] 视频 ${publishIndex + 1}/${expectedCount} 开始`, 'info');
                             publishState.clicked.add(publishIndex);
                             ensureImmediatePublishSelected(item);
-                            safeClick(pubBtn);
+                            clickPublishButtonOnce(pubBtn);
                             const published = await waitForPublishSuccess(item, publishIndex + 1);
                             if (!published) {
                                 addLog(`[发布] 视频 ${publishIndex + 1}/${expectedCount} 发布成功未确认`, 'error');
@@ -3255,7 +3565,10 @@
                     }
                 }
 
-                const completed = coverState.uiConfirmed.size >= expectedCount && publishState.uiConfirmed.size >= expectedCount;
+                const publishedAuditOk = !publishEnabled || auditAllPublishedItems(expectedCount, '发布结束复核');
+                const completed = coverState.uiConfirmed.size >= expectedCount &&
+                    publishState.uiConfirmed.size >= expectedCount &&
+                    publishedAuditOk;
                 if (!completed) {
                     addLog(`[封面发布] 等待超时：封面 ${coverState.uiConfirmed.size}/${expectedCount}，发布 ${publishState.uiConfirmed.size}/${expectedCount}`, 'error');
                 }
@@ -3364,6 +3677,35 @@
                 return false;
             }
 
+            function getCoverCardFromTrigger(triggerButton) {
+                return triggerButton?.closest?.('div[class*="video-list_detail"]') ||
+                    triggerButton?.closest?.('div[class*="video-list_itemWrap"]') ||
+                    null;
+            }
+
+            function isCoverThumbnailReady(card) {
+                if (!card) return false;
+                const coverRoot = card.querySelector('[class*="video-list_coverImage"]') || card;
+                const images = Array.from(coverRoot.querySelectorAll('img'));
+                return images.some((img) => {
+                    const src = String(img.getAttribute('src') || '').trim();
+                    if (!src || src.startsWith('data:')) return false;
+                    const retryStatus = String(img.getAttribute('data-retry-status') || '').toLowerCase();
+                    if (retryStatus === 'success') return true;
+                    return img.complete && (img.naturalWidth || 0) > 0 && (img.naturalHeight || 0) > 0;
+                });
+            }
+
+            async function waitForCoverThumbnailReady(triggerButton, timeout = 15000) {
+                const startedAt = Date.now();
+                while (Date.now() - startedAt < timeout) {
+                    const card = getCoverCardFromTrigger(triggerButton);
+                    if (isCoverThumbnailReady(card)) return true;
+                    await sleep(300);
+                }
+                return false;
+            }
+
             function getElementText(el) {
                 return (el && (el.innerText || el.textContent) || '').trim().replace(/\s+/g, ' ');
             }
@@ -3375,7 +3717,46 @@
                 return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
             }
 
+            function hasPublishedMask(item) {
+                const wrap = getVideoItemWrap(item);
+                return Boolean(wrap?.querySelector?.('[class*="video-list_mask"]'));
+            }
+
+            function hasRateLimitNotice() {
+                const pageText = document.body?.innerText || '';
+                return /操作频繁|频繁操作|请稍后|稍后再试|太频繁/.test(pageText);
+            }
+
+            function findPublishConfirmButton() {
+                const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .ant-modal, .el-dialog, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [data-testid*="modal"], [class*="MDL_"]'))
+                    .filter((dialog) => isVisibleElement(dialog) && !dialog.closest?.(`#${ROOT_ID}`));
+                for (const dialog of dialogs) {
+                    const dialogText = getElementText(dialog);
+                    if (/操作频繁|频繁操作|请稍后|稍后再试|太频繁/.test(dialogText)) continue;
+                    if (!/(确认发布|继续发布|发布确认|提交发布|确认提交|风险提示|审核提示)/.test(dialogText)) continue;
+                    const candidates = Array.from(dialog.querySelectorAll('button, [role="button"]'))
+                        .filter((btn) => {
+                            const text = getElementText(btn);
+                            return isVisibleElement(btn) &&
+                                /(确认|确定|发布|继续发布|提交|我知道了)/.test(text) &&
+                                !/(取消|返回|关闭|暂不)/.test(text) &&
+                                !btn.disabled &&
+                                btn.getAttribute('aria-disabled') !== 'true';
+                        });
+                    const primary = candidates.find((btn) => /primary|confirm|submit/i.test(String(btn.className || ''))) || candidates[0];
+                    if (primary) return primary;
+                }
+                return null;
+            }
+
             function clickPublishConfirmIfPresent() {
+                const primary = findPublishConfirmButton();
+                if (primary) {
+                    primary.scrollIntoView({ block: 'center' });
+                    robustClick(primary);
+                    return getElementText(primary) || '确认';
+                }
+                return '';
                 const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .ant-modal, .el-dialog, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [data-testid*="modal"], [class*="MDL_"]'))
                     .filter((dialog) => isVisibleElement(dialog) && !dialog.closest?.(`#${ROOT_ID}`));
                 for (const dialog of dialogs) {
@@ -3401,6 +3782,37 @@
             }
 
             function getPublishSuccessSnapshot(item) {
+                {
+                const itemText = item?.innerText || '';
+                const pageText = document.body?.innerText || '';
+                const loading = getVisibleUploadLoadingNodes().length;
+                const buttonState = getPublishButtonUiState(item);
+                const itemGone = Boolean(item && !document.body.contains(item));
+                const noPendingUI = !hasPendingUiState();
+                const maskPublished = hasPublishedMask(item);
+                const cardPublished = maskPublished || buttonState.isPublished;
+                const hasSuccessText = /发布成功|已发布|提交成功|审核中|发布完成|鍙戝竷鎴愬姛|宸插彂甯/.test(itemText);
+                const hasGlobalSuccessText = /发布成功|提交成功|已发布|审核中|发布完成|视频审核通过后可获得短视频流量卡|鍙戝竷鎴愬姛|宸插彂甯/.test(pageText);
+                const rateLimited = hasRateLimitNotice();
+                const explicitSuccess = cardPublished || hasSuccessText || (itemGone && hasGlobalSuccessText);
+                return {
+                    hasSuccessText,
+                    hasGlobalSuccessText,
+                    publishButtonVisible: buttonState.hasClickablePublish,
+                    publishButtonDisabled: buttonState.isDisabled,
+                    publishButtonText: buttonState.text,
+                    publishButtonPublished: buttonState.isPublished,
+                    publishButtonPublishing: buttonState.isPublishing,
+                    maskPublished,
+                    cardPublished,
+                    itemGone,
+                    explicitSuccess,
+                    rateLimited,
+                    loading,
+                    noPendingUI,
+                    uiStable: cardPublished || (hasSuccessText && noPendingUI && loading === 0 && !buttonState.isPublishing)
+                };
+                }
                 const itemText = item?.innerText || '';
                 const pageText = document.body?.innerText || '';
                 const loading = getVisibleUploadLoadingNodes().length;
@@ -3431,12 +3843,16 @@
                 let confirmDialogClicked = false;
                 addLog(`[等待发布] 视频 ${videoIndex + 1}/${total}`, 'info');
                 await waitUntil(() => {
-                    const confirmClicked = clickPublishConfirmIfPresent();
+                    const confirmClicked = confirmDialogClicked ? '' : clickPublishConfirmIfPresent();
                     if (confirmClicked && !confirmDialogClicked) {
                         confirmDialogClicked = true;
                         addLog(`[发布] 视频 ${videoIndex + 1}/${total} 已点击确认弹窗：${confirmClicked}`, 'info');
                     }
                     const snapshot = getPublishSuccessSnapshot(item);
+                    if (snapshot.rateLimited) {
+                        addLog(`[发布] 视频 ${videoIndex + 1}/${total} 检测到操作频繁，停止等待并阻断`, 'error');
+                        return true;
+                    }
                     if (snapshot.explicitSuccess) {
                         successConfirmed = true;
                         publishState.successConfirmed.add(videoIndex);
@@ -3471,6 +3887,49 @@
 
             async function waitForPublishSuccess(item, index, timeout = 30000) {
                 return waitPublishConfirm(item, index - 1, currentBatchExpectedCount, timeout);
+            }
+
+            function getItemPublishIndex(item, fallbackIndex) {
+                const datasetIndex = Number(item?.dataset?.pddPublishIndex);
+                return Number.isFinite(datasetIndex) ? datasetIndex : fallbackIndex;
+            }
+
+            function refreshPublishedStateFromDom(expectedCount) {
+                const items = collectUploadSuccessVideoCards().slice(0, expectedCount);
+                const missing = [];
+                let publishedCount = 0;
+                items.forEach((item, fallbackIndex) => {
+                    const publishIndex = getItemPublishIndex(item, fallbackIndex);
+                    const snapshot = getPublishSuccessSnapshot(item);
+                    if (snapshot.cardPublished || snapshot.uiStable) {
+                        publishState.successConfirmed.add(publishIndex);
+                        publishState.uiConfirmed.add(publishIndex);
+                        item.dataset.pddPublishDone = 'true';
+                        publishedCount += 1;
+                    } else {
+                        missing.push(publishIndex + 1);
+                    }
+                });
+                batchLifecycle.publishedCount = publishState.uiConfirmed.size;
+                return {
+                    itemsCount: items.length,
+                    publishedCount,
+                    missing
+                };
+            }
+
+            function auditAllPublishedItems(expectedCount, label = '发布复核') {
+                const audit = refreshPublishedStateFromDom(expectedCount);
+                addLog(`[${label}] 已发布状态 ${audit.publishedCount}/${expectedCount}`, audit.publishedCount >= expectedCount ? 'success' : 'error');
+                if (audit.itemsCount < expectedCount) {
+                    addLog(`[${label}] 页面可见上传成功视频不足：${audit.itemsCount}/${expectedCount}`, 'error');
+                    return false;
+                }
+                if (audit.missing.length) {
+                    addLog(`[${label}] 未确认已发布的视频：${audit.missing.join(', ')}`, 'error');
+                    return false;
+                }
+                return true;
             }
 
             function isPublishCompleted(total) {
@@ -3532,6 +3991,13 @@
                     logPublishChecks(expectedCount);
                     logLifecycleChecks(expectedCount, { nextBatchBlocked: true });
                     addLog('[等待发布确认] 超时或中断，禁止进入下一批', 'error');
+                    timerLog('publish_wait_done');
+                    return false;
+                }
+                if (publishEnabled && !auditAllPublishedItems(expectedCount, '发布完成复核')) {
+                    logPublishChecks(expectedCount);
+                    logLifecycleChecks(expectedCount, { nextBatchBlocked: true });
+                    addLog('[发布完成复核] 仍有视频未显示已发布，禁止结束流程', 'error');
                     timerLog('publish_wait_done');
                     return false;
                 }
@@ -3649,7 +4115,7 @@
                         addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 开始`, 'info');
                         publishState.clicked.add(i);
                         ensureImmediatePublishSelected(item);
-                        safeClick(pubBtn);
+                        clickPublishButtonOnce(pubBtn);
                         const published = await waitForPublishSuccess(item, i + 1);
                         if (!published) {
                             addLog(`[发布] 视频 ${i + 1}/${videoItems.length} 发布成功未确认`, 'error');
@@ -3773,8 +4239,11 @@
             };
             bindToggle('label-delay-config', 'content-delay-config', 'arrow-delay-config');
             bindToggle('label-declare-config', 'content-declare-config', 'arrow-declare-config');
+            bindToggle('label-manual-delay-config', 'content-manual-delay-config', 'arrow-manual-delay-config');
+            bindToggle('label-manual-declare-config', 'content-manual-declare-config', 'arrow-manual-declare-config');
             bindToggle('video-workbench-perf-toggle', 'video-workbench-perf-body', 'video-workbench-perf-arrow');
             bindDelayConfigPersistence();
+            bindManualConfigBridge();
 
             document.getElementById('video-workbench-log-toggle').onclick = () => {
                 const body = document.getElementById('video-workbench-log-list');
@@ -3793,6 +4262,10 @@
                     addLog('匹配到历史标题', 'info');
                 }
             };
+
+            document.getElementById('video-workbench-manual-start')?.addEventListener('click', function () {
+                runManualExistingVideoFlow(this);
+            });
 
             const closeVideoWorkbench = () => {
                 panel.style.display = 'none';
