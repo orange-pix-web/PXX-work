@@ -788,6 +788,7 @@
                 };
 
                 document.getElementById('btn-start-autopage').onclick = startAutoPage;
+                document.getElementById('btn-save').onclick = saveCurrentSnapshot;
                 document.getElementById('btn-stop-autopage').onclick = stopAutoPage;
 
                 const filterSelect = document.getElementById('his-goods-filter');
@@ -829,6 +830,74 @@
                 const his = await window.PddStorage.get(STORAGE_KEY, []);
                 const historyCountSpan = document.getElementById('export-history-count');
                 if (historyCountSpan) historyCountSpan.innerText = his.length;
+            }
+
+            let isSavingSnapshot = false;
+
+            function cloneCaptureListForSnapshot() {
+                return JSON.parse(JSON.stringify(lastCapturedList || []));
+            }
+
+            async function saveCurrentSnapshot() {
+                if (isSavingSnapshot) return;
+                const saveButton = document.getElementById('btn-save');
+                try {
+                    isSavingSnapshot = true;
+                    if (saveButton) {
+                        saveButton.disabled = true;
+                        saveButton.innerText = "保存中...";
+                    }
+
+                    if (!lastCapturedList.length) {
+                        doCapture(false);
+                    }
+
+                    if (!lastCapturedList.length) {
+                        alert("请先获取数据");
+                        return;
+                    }
+
+                    if (!currentGoodsId) {
+                        currentGoodsId = getGoodsId() || "";
+                    }
+
+                    const snapshot = {
+                        id: Date.now(),
+                        goodsId: currentGoodsId,
+                        data: cloneCaptureListForSnapshot(),
+                        time: new Date().toLocaleString()
+                    };
+                    const his = await window.PddStorage.get(STORAGE_KEY, []);
+                    his.unshift(snapshot);
+                    await window.PddStorage.set(STORAGE_KEY, his);
+
+                    const saved = await window.PddStorage.get(STORAGE_KEY, []);
+                    const verified = saved.some(item => item.id === snapshot.id);
+                    if (!verified) {
+                        throw new Error("快照写入后校验失败");
+                    }
+
+                    alert(`已存入历史存档：${snapshot.data.length} 条`);
+                    if (document.getElementById('pane-his').style.display === 'flex') {
+                        await updateGoodsFilterOptions();
+                        await renderHistory();
+                    }
+                    if (document.getElementById('pane-export').style.display === 'flex') {
+                        await updateExportPanelStats();
+                    }
+                    if (document.getElementById('pane-compare').style.display === 'flex') {
+                        await refreshComparePanelData();
+                    }
+                } catch (error) {
+                    console.error('[PDD视频监控] 保存快照失败', error);
+                    alert(`保存快照失败：${error?.message || error}`);
+                } finally {
+                    isSavingSnapshot = false;
+                    if (saveButton) {
+                        saveButton.disabled = false;
+                        saveButton.innerText = "💾 保存快照";
+                    }
+                }
             }
 
             async function updateGoodsFilterOptions() {
