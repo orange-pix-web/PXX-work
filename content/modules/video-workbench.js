@@ -32,6 +32,7 @@
             let currentBatchExpectedCount = 0;
             const uploadAttemptState = new Map();
             const executionLogs = [];
+            let activeRunSummary = null;
             const MEMORY_KEY = 'pdd_video_helper_memory';
             const DELAY_CONFIG_STORAGE_KEY = 'pdd_video_workbench_delay_config';
             const DELAY_CONFIG_IDS = [
@@ -559,6 +560,88 @@
                 logList.prepend(item);
                 logList.scrollTop = 0;
                 updateLogStatusCard({ logText: msg });
+            }
+
+            function normalizeSummaryFileName(fileLike, index = 0) {
+                if (typeof fileLike === 'string') {
+                    return fileLike.trim() || `视频 ${index + 1}`;
+                }
+                const rawName = fileLike?.name ||
+                    fileLike?.fileName ||
+                    fileLike?.relativePath ||
+                    fileLike?.webkitRelativePath ||
+                    '';
+                const name = String(rawName).split(/[\\/]/).filter(Boolean).pop() || '';
+                return name.trim() || `视频 ${index + 1}`;
+            }
+
+            function extractVideoFileNameFromCard(item, index = 0) {
+                const fileNameText = item?.querySelector?.('[class*="video-list_fileName"] p')?.textContent ||
+                    item?.querySelector?.('[class*="video-list_fileName"]')?.textContent ||
+                    '';
+                const directName = String(fileNameText).replace(/^文件名[:：]\s*/u, '').trim();
+                if (directName) return directName;
+                const text = getElementText(item);
+                const matched = text.match(/文件名[:：]\s*([^\n\r]+)/u);
+                return matched?.[1]?.trim() || `视频 ${index + 1}`;
+            }
+
+            function createRunSummary(productId, mode) {
+                return {
+                    productId: String(productId || '').trim(),
+                    mode,
+                    startedAt: Date.now(),
+                    totalBatches: 0,
+                    batches: []
+                };
+            }
+
+            function addRunSummaryBatch(summary, batchInfo = {}) {
+                if (!summary) return null;
+                const files = Array.isArray(batchInfo.files) ? batchInfo.files : [];
+                const batchIndex = Math.max(1, Number(batchInfo.batchIndex) || summary.batches.length + 1);
+                const totalBatches = Math.max(batchIndex, Number(batchInfo.totalBatches) || summary.totalBatches || batchIndex);
+                const entry = {
+                    batchIndex,
+                    totalBatches,
+                    status: batchInfo.status || 'done',
+                    reason: batchInfo.reason || '',
+                    count: files.length,
+                    files: files.map((file, index) => ({
+                        name: normalizeSummaryFileName(file, index),
+                        size: Number(file?.size || 0) || 0
+                    }))
+                };
+                const existingIndex = summary.batches.findIndex((batch) => batch.batchIndex === batchIndex);
+                if (existingIndex >= 0) {
+                    summary.batches[existingIndex] = entry;
+                } else {
+                    summary.batches.push(entry);
+                }
+                summary.totalBatches = totalBatches;
+                summary.updatedAt = Date.now();
+                return entry;
+            }
+
+            function getRunSummaryVideoCount(summary) {
+                return (summary?.batches || []).reduce((total, batch) => total + (batch.files?.length || batch.count || 0), 0);
+            }
+
+            function logRunSummary(summary, accepted, reason) {
+                if (!summary) return;
+                const modeLabel = summary.mode === 'manual' ? '手动发布' : '批量发布';
+                const totalVideos = getRunSummaryVideoCount(summary);
+                const statusText = accepted ? '完成' : '未完成';
+                const reasonText = !accepted && reason ? `，原因：${reason}` : '';
+                addLog(`[总结] 商品 ${summary.productId || '-'} ${modeLabel}${statusText}：${totalVideos} 个视频，${summary.batches.length} 个批次${reasonText}`, accepted ? 'success' : 'error');
+                (summary.batches || []).forEach((batch) => {
+                    const batchStatus = batch.status === 'done' ? '完成' : `未完成${batch.reason ? `/${batch.reason}` : ''}`;
+                    addLog(`[总结] 第 ${batch.batchIndex}/${batch.totalBatches || summary.totalBatches || summary.batches.length} 批：${batch.files?.length || 0} 个，${batchStatus}`, batch.status === 'done' ? 'success' : 'error');
+                    (batch.files || []).forEach((file, index) => {
+                        const sizeText = file.size ? ` / ${formatBytes(file.size)}` : '';
+                        addLog(`[总结]   ${index + 1}. ${file.name}${sizeText}`, 'info');
+                    });
+                });
             }
 
             async function copyExecutionLogs() {
@@ -1844,6 +1927,8 @@
             async function uploadFilesBatch(files, config) {
                 const productId = config?.productId || document.getElementById('pub-id')?.value.trim();
                 const maxCount = Math.max(1, parseInt(config?.maxCount, 10) || 20);
+                const runSummary = createRunSummary(productId, 'batch');
+                activeRunSummary = runSummary;
                 batchLifecycle.processedFileKeys = new Set();
                 let totalBatches = 0;
                 let uploadedBatches = 0;
@@ -1864,7 +1949,8 @@
                                 totalBatches: 0,
                                 uploadedBatches: 0,
                                 maxCount,
-                                handledWorkflow: true
+                                handledWorkflow: true,
+                                summary: runSummary
                             };
                         }
                         break;
@@ -1879,6 +1965,7 @@
                     });
                     if (i === 0) {
                         totalBatches = splitResult.batches.length;
+                        runSummary.totalBatches = totalBatches;
                     }
 
                     const batch = splitResult.batches[0];
@@ -1904,6 +1991,13 @@
 
                     const accepted = await uploadSingleBatch(batch.files);
                     if (!accepted) {
+                        addRunSummaryBatch(runSummary, {
+                            batchIndex: i + 1,
+                            totalBatches,
+                            files: batch.files,
+                            status: 'fail',
+                            reason: 'upload-not-accepted'
+                        });
                         return {
                             accepted: false,
                             reason: 'upload-not-accepted',
@@ -1911,13 +2005,21 @@
                             totalBatches,
                             uploadedBatches: i,
                             maxCount,
-                            handledWorkflow: true
+                            handledWorkflow: true,
+                            summary: runSummary
                         };
                     }
 
                     assertPhase('FILL_PHASE');
                     const fillReady = await runFillPhase();
                     if (!fillReady) {
+                        addRunSummaryBatch(runSummary, {
+                            batchIndex: i + 1,
+                            totalBatches,
+                            files: batch.files,
+                            status: 'fail',
+                            reason: 'fill-incomplete'
+                        });
                         return {
                             accepted: false,
                             reason: 'fill-incomplete',
@@ -1925,11 +2027,19 @@
                             totalBatches,
                             uploadedBatches: i,
                             maxCount,
-                            handledWorkflow: true
+                            handledWorkflow: true,
+                            summary: runSummary
                         };
                     }
                     const publishReady = await runPublishPhase();
                     if (!publishReady) {
+                        addRunSummaryBatch(runSummary, {
+                            batchIndex: i + 1,
+                            totalBatches,
+                            files: batch.files,
+                            status: 'fail',
+                            reason: 'publish-incomplete'
+                        });
                         return {
                             accepted: false,
                             reason: 'publish-incomplete',
@@ -1937,11 +2047,19 @@
                             totalBatches,
                             uploadedBatches: i,
                             maxCount,
-                            handledWorkflow: true
+                            handledWorkflow: true,
+                            summary: runSummary
                         };
                     }
                     const batchDone = await completeBatchIfReady();
                     if (!batchDone) {
+                        addRunSummaryBatch(runSummary, {
+                            batchIndex: i + 1,
+                            totalBatches,
+                            files: batch.files,
+                            status: 'fail',
+                            reason: 'batch-not-done'
+                        });
                         return {
                             accepted: false,
                             reason: 'batch-not-done',
@@ -1949,9 +2067,16 @@
                             totalBatches,
                             uploadedBatches: i,
                             maxCount,
-                            handledWorkflow: true
+                            handledWorkflow: true,
+                            summary: runSummary
                         };
                     }
+                    addRunSummaryBatch(runSummary, {
+                        batchIndex: i + 1,
+                        totalBatches,
+                        files: batch.files,
+                        status: 'done'
+                    });
                     markFilesProcessed(batch.files);
                     uploadedBatches = i + 1;
                     const navigationResult = await runNavigationPhase();
@@ -1963,7 +2088,8 @@
                             totalBatches,
                             uploadedBatches: i + 1,
                             maxCount,
-                            handledWorkflow: true
+                            handledWorkflow: true,
+                            summary: runSummary
                         };
                     }
                     console.log('BATCH_END', i);
@@ -1979,7 +2105,8 @@
                     totalBatches,
                     uploadedBatches,
                     maxCount,
-                    handledWorkflow: true
+                    handledWorkflow: true,
+                    summary: runSummary
                 };
             }
 
@@ -2407,7 +2534,7 @@
             panel.dataset.pddModule = 'video-workbench';
             panel.innerHTML = `
                 <div class="ws-header">
-                    <span id="video-workbench-title">视频工作台 V0.2.0</span>
+                    <span id="video-workbench-title">视频工作台 V0.2.1</span>
                     <div>
                         <span id="video-workbench-close" style="cursor:pointer; font-size: 18px; line-height: 1;">×</span>
                     </div>
@@ -2729,6 +2856,21 @@
                     return;
                 }
 
+                const manualSummary = createRunSummary(productId, 'manual');
+                const manualFiles = collectManualExistingVideoCards()
+                    .slice(0, expectedCount)
+                    .map((item, index) => ({
+                        name: extractVideoFileNameFromCard(item, index),
+                        size: 0
+                    }));
+                while (manualFiles.length < expectedCount) {
+                    manualFiles.push({
+                        name: `视频 ${manualFiles.length + 1}`,
+                        size: 0
+                    });
+                }
+                activeRunSummary = manualSummary;
+
                 isRunning = true;
                 isPaused = false;
                 START_LOCK = true;
@@ -2738,6 +2880,8 @@
                 resetStartupPerf();
 
                 let flowSucceeded = false;
+                let flowReason = 'unknown-failure';
+                moduleApi.lastRunResult = null;
                 try {
                     const memory = JSON.parse(localStorage.getItem(MEMORY_KEY) || '{}');
                     memory[productId] = title;
@@ -2745,20 +2889,40 @@
                     prepareManualExistingVideoBatch(expectedCount);
                     const fillReady = await runFillPhase();
                     if (!fillReady) {
+                        flowReason = 'fill-incomplete';
                         addLog('[手动发布] 信息填充未完成，流程已阻断', 'error');
                         return;
                     }
                     const publishReady = await runPublishPhase();
                     if (!publishReady) {
+                        flowReason = 'publish-incomplete';
                         addLog('[手动发布] 封面或发布未完成，流程已阻断', 'error');
                         return;
                     }
                     flowSucceeded = true;
+                    flowReason = 'completed';
                     addLog('[手动发布] 当前页面视频处理完成', 'success');
                 } catch (error) {
                     console.error('VIDEO_WORKBENCH_MANUAL_FLOW_ERROR', error);
+                    flowReason = error?.message || String(error);
                     addLog(`[手动发布] 执行失败：${error?.message || error}`, 'error');
                 } finally {
+                    addRunSummaryBatch(manualSummary, {
+                        batchIndex: 1,
+                        totalBatches: 1,
+                        files: manualFiles,
+                        status: flowSucceeded ? 'done' : 'fail',
+                        reason: flowSucceeded ? '' : flowReason
+                    });
+                    logRunSummary(manualSummary, flowSucceeded, flowReason);
+                    moduleApi.lastRunResult = {
+                        accepted: flowSucceeded,
+                        reason: flowReason,
+                        handledWorkflow: true,
+                        at: Date.now(),
+                        summary: manualSummary
+                    };
+                    activeRunSummary = null;
                     isRunning = false;
                     isPaused = false;
                     START_LOCK = false;
@@ -4191,12 +4355,22 @@
                     };
                     addLog(`[流程] 执行失败：${error?.message || error}`, 'error');
                 } finally {
+                    const finalSummary = uploadPhaseResult?.summary || activeRunSummary || null;
+                    if (finalSummary) {
+                        logRunSummary(
+                            finalSummary,
+                            flowSucceeded,
+                            uploadPhaseResult?.reason || (flowSucceeded ? 'completed' : 'unknown-failure')
+                        );
+                    }
                     moduleApi.lastRunResult = {
                         accepted: flowSucceeded,
                         reason: uploadPhaseResult?.reason || (flowSucceeded ? 'completed' : 'unknown-failure'),
                         handledWorkflow: Boolean(uploadPhaseResult?.handledWorkflow),
-                        at: Date.now()
+                        at: Date.now(),
+                        summary: finalSummary
                     };
+                    activeRunSummary = null;
                     isRunning = false;
                     isPaused = false;
                     START_LOCK = false;

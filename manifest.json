@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PDD Assistant",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "PDD browser extension with promotion goods and audit-status video batch delete tools with continuous current-page deletion and optional pagination.",
   "permissions": [
     "storage",

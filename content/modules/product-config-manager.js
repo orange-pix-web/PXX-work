@@ -334,6 +334,49 @@
         logEvent(type, text, data);
     }
 
+    function getRunSummaryVideoCount(summary) {
+        return (summary?.batches || []).reduce((total, batch) => {
+            return total + (batch.files?.length || batch.count || 0);
+        }, 0);
+    }
+
+    function logProductRunSummary(productId, summary, status, reason = '') {
+        if (!summary) return;
+        const count = getRunSummaryVideoCount(summary);
+        const statusLabel = status === 'done' ? '完成' : '未完成';
+        const type = status === 'done' ? 'success' : 'error';
+        const reasonText = status === 'done' || !reason ? '' : `，原因：${reason}`;
+        logEvent(type, `[总结] 商品 ${productId}：${statusLabel} ${count} 个视频${reasonText}`, {
+            productId,
+            status,
+            reason,
+            videoCount: count,
+            summary
+        });
+    }
+
+    function logQueueRunSummary(results) {
+        const summarized = (results || []).filter((result) => result?.summary);
+        if (!summarized.length) return;
+        const doneCount = summarized.filter((result) => result.status === 'done').length;
+        const failCount = summarized.filter((result) => result.status === 'fail').length;
+        const totalVideos = summarized.reduce((total, result) => total + getRunSummaryVideoCount(result.summary), 0);
+        logEvent(failCount ? 'error' : 'success', `[总结] 本轮队列：${doneCount} 个商品完成，${failCount} 个商品失败，共记录 ${totalVideos} 个视频`, {
+            doneCount,
+            failCount,
+            totalVideos
+        });
+        summarized.forEach((result) => {
+            const count = getRunSummaryVideoCount(result.summary);
+            const statusLabel = result.status === 'done' ? '完成' : '未完成';
+            logEvent(result.status === 'done' ? 'success' : 'error', `[总结] 商品 ${result.productId}：${statusLabel} ${count} 个视频`, {
+                productId: result.productId,
+                status: result.status,
+                videoCount: count
+            });
+        });
+    }
+
     function buildVideoMeta(file) {
         const relativePath = String(file.webkitRelativePath || file.name || '');
         return {
@@ -1063,16 +1106,20 @@
         }
 
         const workbenchResult = window.PddModules?.videoWorkbench?.lastRunResult;
+        const summary = workbenchResult?.summary || null;
         if (!workbenchResult?.accepted) {
+            const reason = workbenchResult?.reason || 'workbench-not-accepted';
+            logProductRunSummary(effectiveConfig.productId, summary, 'fail', reason);
             setStatusAndLog(`发布失败：${effectiveConfig.productId} ${workbenchResult?.reason || '工作台未确认完成'}`, 'error', {
                 productId: effectiveConfig.productId,
-                reason: workbenchResult?.reason || 'workbench-not-accepted'
+                reason
             });
             return {
                 productId: effectiveConfig.productId,
                 status: 'fail',
                 isFatal: false,
-                reason: workbenchResult?.reason || 'workbench-not-accepted'
+                reason,
+                summary
             };
         }
 
@@ -1081,10 +1128,12 @@
             selectedCount: task.videos.length,
             totalSizeBytes: task.totalSizeBytes
         });
+        logProductRunSummary(effectiveConfig.productId, summary, 'done');
         return {
             productId: effectiveConfig.productId,
             status: 'done',
-            isFatal: false
+            isFatal: false,
+            summary
         };
     }
 
@@ -1146,6 +1195,7 @@
             }
         }
 
+        logQueueRunSummary(results);
         return {
             results,
             productIndex,
