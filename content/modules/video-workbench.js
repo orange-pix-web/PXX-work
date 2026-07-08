@@ -1717,6 +1717,61 @@
                 return false;
             }
 
+            function getBatchNavigationConfig() {
+                const config = window.PddModules?.productConfigManager?.getGlobalBatchConfig?.() || {};
+                const numberOr = (value, fallback) => {
+                    const parsed = Number(value);
+                    return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+                };
+                return {
+                    preUploadNavigation: config.preUploadNavigation !== false,
+                    beforeHomeClickWait: numberOr(config.beforeHomeClickWait, 3000),
+                    homeClickWait: numberOr(config.homeClickWait, 3000),
+                    publishClickWait: numberOr(config.publishClickWait, 3000),
+                    uploadReadyWait: numberOr(config.uploadReadyWait, 1500),
+                    batchTransitionWait: numberOr(config.batchTransitionWait, 3000)
+                };
+            }
+
+            async function waitAfterUploadAreaReady(config) {
+                if (!config.uploadReadyWait) return;
+                addLog(`[导航] 上传区就绪后等待 ${config.uploadReadyWait}ms`, 'info');
+                await sleep(config.uploadReadyWait);
+            }
+
+            async function preparePublishPageBeforeUpload(reason = 'batch') {
+                const navConfig = getBatchNavigationConfig();
+                if (!navConfig.preUploadNavigation) return true;
+                setPhase('NAVIGATION_PHASE');
+                addLog(`[导航] 上传前准备发布页：${reason}`, 'info');
+                await closeAllPopups();
+                if (navConfig.beforeHomeClickWait) {
+                    addLog(`[导航] 点击商家首页前等待 ${navConfig.beforeHomeClickWait}ms`, 'info');
+                    await sleep(navConfig.beforeHomeClickWait);
+                }
+                const publishUrlBeforeHome = getCurrentUrl();
+                addLog('[导航] 点击左侧商家首页', 'info');
+                const sidebarHome = await clickSidebarAndWaitUrl('商家首页', publishUrlBeforeHome);
+                if (navConfig.homeClickWait) {
+                    addLog(`[导航] 商家首页后等待 ${navConfig.homeClickWait}ms`, 'info');
+                    await sleep(navConfig.homeClickWait);
+                }
+                const homeUrlBeforePublish = getCurrentUrl();
+                addLog('[导航] 点击左侧发布视频', 'info');
+                const sidebarPublish = await clickSidebarAndWaitUrl('发布视频', homeUrlBeforePublish);
+                if (navConfig.publishClickWait) {
+                    addLog(`[导航] 发布视频后等待 ${navConfig.publishClickWait}ms`, 'info');
+                    await sleep(navConfig.publishClickWait);
+                }
+                const pageReady = await waitForPageReady();
+                const uploadAreaReady = await waitForUploadAreaReady();
+                if (uploadAreaReady) {
+                    await waitAfterUploadAreaReady(navConfig);
+                }
+                setPhase('UPLOAD_PHASE');
+                return Boolean(sidebarHome && sidebarPublish && pageReady && uploadAreaReady);
+            }
+
             async function afterBatchComplete() {
                 if (currentPhase !== 'NAVIGATION_PHASE') {
                     console.log('PHASE_BLOCKED_NAVIGATION', currentPhase);
@@ -1753,16 +1808,25 @@
 
                 isNavigationLocked = true;
                 try {
+                    const navConfig = getBatchNavigationConfig();
                     await closeAllPopups();
+                    if (navConfig.beforeHomeClickWait) {
+                        addLog(`[导航] 点击商家首页前等待 ${navConfig.beforeHomeClickWait}ms`, 'info');
+                        await sleep(navConfig.beforeHomeClickWait);
+                    }
                     const publishUrlBeforeHome = getCurrentUrl();
                     addLog('[导航] 点击左侧商家首页', 'info');
                     const sidebarHome = await clickSidebarAndWaitUrl('商家首页', publishUrlBeforeHome);
-                    await sleep(1200);
+                    await sleep(navConfig.homeClickWait);
                     const homeUrlBeforePublish = getCurrentUrl();
                     addLog('[导航] 点击左侧发布视频', 'info');
                     const sidebarPublish = await clickSidebarAndWaitUrl('发布视频', homeUrlBeforePublish);
+                    await sleep(navConfig.publishClickWait);
                     const pageReady = await waitForPageReady();
                     const uploadAreaReady = await waitForUploadAreaReady();
+                    if (uploadAreaReady) {
+                        await waitAfterUploadAreaReady(navConfig);
+                    }
                     console.log('CLICK_VERIFY', {
                         sidebar_home: sidebarHome,
                         sidebar_publish: sidebarPublish,
@@ -1932,11 +1996,28 @@
                 batchLifecycle.processedFileKeys = new Set();
                 let totalBatches = 0;
                 let uploadedBatches = 0;
+                const navigateBeforeFirstBatch = Boolean(moduleApi.preUploadNavigationRequired);
+                moduleApi.preUploadNavigationRequired = false;
 
                 for (let i = 0; ; i++) {
                     const batchId = `${productId || 'batch'}-${Date.now()}-${i + 1}`;
                     resetBatchLifecycle(batchId);
                     console.log('BATCH_START', i);
+                    if (i === 0 && navigateBeforeFirstBatch) {
+                        const prepared = await preparePublishPageBeforeUpload('queue-product');
+                        if (!prepared) {
+                            return {
+                                accepted: false,
+                                reason: 'navigation-failed',
+                                failedBatchIndex: i,
+                                totalBatches,
+                                uploadedBatches,
+                                maxCount,
+                                handledWorkflow: true,
+                                summary: runSummary
+                            };
+                        }
+                    }
                     const scanned = await scanFolderFiles(productId, config, {
                         force: false,
                         batchId
@@ -2097,7 +2178,7 @@
                         break;
                     }
                     addLog(`[下一批] 已回到发布视频页，准备扫描并上传 ${uploadedBatches + 1}/${totalBatches}`, 'info');
-                    await sleep(3000);
+                    await sleep(getBatchNavigationConfig().batchTransitionWait);
                 }
 
                 return {
@@ -2534,7 +2615,7 @@
             panel.dataset.pddModule = 'video-workbench';
             panel.innerHTML = `
                 <div class="ws-header">
-                    <span id="video-workbench-title">视频工作台 V0.2.1</span>
+                    <span id="video-workbench-title">视频工作台 V0.2.2</span>
                     <div>
                         <span id="video-workbench-close" style="cursor:pointer; font-size: 18px; line-height: 1;">×</span>
                     </div>

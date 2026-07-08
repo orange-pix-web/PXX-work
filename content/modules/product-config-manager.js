@@ -8,12 +8,20 @@
     const SNAPSHOT_STORE = 'folderSnapshots';
     const HANDLE_STORE = 'folderHandles';
     const FILE_STORE = 'resolvedVideoFiles';
+    const BATCH_CONFIG_STORAGE_KEY = 'pdd_product_config_manager_batch_config';
     const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm'];
     const MIN_VALID_VIDEO_SIZE = 10 * 1024;
     const DEFAULT_GLOBAL_BATCH_CONFIG = {
         maxCount: 20,
         maxSize: 1024,
-        maxSizeUnit: 'MB'
+        maxSizeUnit: 'MB',
+        preUploadNavigation: true,
+        beforeHomeClickWait: 3000,
+        homeClickWait: 3000,
+        publishClickWait: 3000,
+        uploadReadyWait: 1500,
+        queueTransitionWait: 3000,
+        batchTransitionWait: 3000
     };
 
     const state = {
@@ -89,8 +97,27 @@
         return {
             maxCount: Math.max(1, Math.floor(toNumber(rawConfig?.maxCount, DEFAULT_GLOBAL_BATCH_CONFIG.maxCount))),
             maxSize: toNumber(rawConfig?.maxSize, DEFAULT_GLOBAL_BATCH_CONFIG.maxSize),
-            maxSizeUnit: rawConfig?.maxSizeUnit === 'GB' ? 'GB' : 'MB'
+            maxSizeUnit: rawConfig?.maxSizeUnit === 'GB' ? 'GB' : 'MB',
+            preUploadNavigation: rawConfig?.preUploadNavigation !== false,
+            beforeHomeClickWait: Math.max(0, Math.floor(toNumber(rawConfig?.beforeHomeClickWait, DEFAULT_GLOBAL_BATCH_CONFIG.beforeHomeClickWait))),
+            homeClickWait: Math.max(0, Math.floor(toNumber(rawConfig?.homeClickWait, DEFAULT_GLOBAL_BATCH_CONFIG.homeClickWait))),
+            publishClickWait: Math.max(0, Math.floor(toNumber(rawConfig?.publishClickWait, DEFAULT_GLOBAL_BATCH_CONFIG.publishClickWait))),
+            uploadReadyWait: Math.max(0, Math.floor(toNumber(rawConfig?.uploadReadyWait, DEFAULT_GLOBAL_BATCH_CONFIG.uploadReadyWait))),
+            queueTransitionWait: Math.max(0, Math.floor(toNumber(rawConfig?.queueTransitionWait, DEFAULT_GLOBAL_BATCH_CONFIG.queueTransitionWait))),
+            batchTransitionWait: Math.max(0, Math.floor(toNumber(rawConfig?.batchTransitionWait, DEFAULT_GLOBAL_BATCH_CONFIG.batchTransitionWait)))
         };
+    }
+
+    function loadGlobalBatchConfig() {
+        try {
+            return normalizeBatchConfig(JSON.parse(localStorage.getItem(BATCH_CONFIG_STORAGE_KEY) || '{}'));
+        } catch (error) {
+            return normalizeBatchConfig(DEFAULT_GLOBAL_BATCH_CONFIG);
+        }
+    }
+
+    function saveGlobalBatchConfig(config) {
+        localStorage.setItem(BATCH_CONFIG_STORAGE_KEY, JSON.stringify(normalizeBatchConfig(config)));
     }
 
     function getGlobalBatchConfig() {
@@ -897,6 +924,7 @@
             ...state.globalBatchConfig,
             ...nextConfig
         });
+        saveGlobalBatchConfig(state.globalBatchConfig);
         syncHiddenBatchFormFields();
         renderConfigListV2();
     }
@@ -1018,7 +1046,7 @@
         });
     }
 
-    async function runTask(config) {
+    async function runTask(config, options = {}) {
         const effectiveConfig = applyGlobalBatchConfig(config);
         const resolvedSnapshot = getSnapshotForProduct(effectiveConfig.productId);
         const task = buildTask({
@@ -1050,6 +1078,9 @@
         });
 
         applyConfigToWorkbench(effectiveConfig, task);
+        if (window.PddModules?.videoWorkbench) {
+            window.PddModules.videoWorkbench.preUploadNavigationRequired = Boolean(options.requirePreUploadNavigation);
+        }
         setStatusAndLog(`商品 ${effectiveConfig.productId} 已装载到工作台`, 'info', {
             productId: effectiveConfig.productId,
             selectedCount: task.videos.length
@@ -1139,12 +1170,12 @@
 
     async function navigateToHome() {
         logEvent('info', '队列过渡：准备返回首页', {});
-        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        await new Promise((resolve) => window.setTimeout(resolve, getGlobalBatchConfig().homeClickWait));
     }
 
     async function navigateToPublishPage() {
         logEvent('info', '队列过渡：准备进入下一商品发布页', {});
-        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        await new Promise((resolve) => window.setTimeout(resolve, getGlobalBatchConfig().publishClickWait));
     }
 
     async function executeProductQueue(productQueue) {
@@ -1168,7 +1199,9 @@
                 remainingQueueLength
             });
 
-            const result = await runTask(config);
+            const result = await runTask(config, {
+                requirePreUploadNavigation: productIndex > 0
+            });
             results.push(result);
             productIndex += 1;
 
@@ -1183,14 +1216,14 @@
 
             if (result?.status === 'fail' && !result?.isFatal) {
                 await navigateToHome();
-                await new Promise((resolve) => window.setTimeout(resolve, 2000));
+                await new Promise((resolve) => window.setTimeout(resolve, getGlobalBatchConfig().queueTransitionWait));
                 await navigateToPublishPage();
                 continue;
             }
 
             if (result?.status === 'done' || result?.status === 'skip') {
                 await navigateToHome();
-                await new Promise((resolve) => window.setTimeout(resolve, 2000));
+                await new Promise((resolve) => window.setTimeout(resolve, getGlobalBatchConfig().queueTransitionWait));
                 await navigateToPublishPage();
             }
         }
@@ -2520,6 +2553,58 @@
         grid.appendChild(countRow);
         grid.appendChild(sizeRow);
         body.appendChild(grid);
+
+        const navGrid = document.createElement('div');
+        navGrid.className = 'pcm-grid';
+        navGrid.style.marginTop = '8px';
+        const batchConfig = getGlobalBatchConfig();
+
+        const navToggleRow = document.createElement('div');
+        navToggleRow.className = 'pcm-row';
+        const navToggleLabel = document.createElement('label');
+        navToggleLabel.textContent = '上传前导航';
+        const navToggleWrap = document.createElement('label');
+        navToggleWrap.className = 'pcm-switch';
+        const navToggle = document.createElement('input');
+        navToggle.type = 'checkbox';
+        navToggle.checked = batchConfig.preUploadNavigation;
+        const navToggleText = document.createElement('span');
+        navToggleText.textContent = '首批跳过，后续批次/商品执行';
+        navToggle.addEventListener('change', () => {
+            updateGlobalBatchConfig({ preUploadNavigation: navToggle.checked });
+        });
+        navToggleWrap.appendChild(navToggle);
+        navToggleWrap.appendChild(navToggleText);
+        navToggleRow.appendChild(navToggleLabel);
+        navToggleRow.appendChild(navToggleWrap);
+
+        function createWaitRow(id, label, value, key) {
+            const row = document.createElement('div');
+            row.className = 'pcm-row';
+            const rowLabel = document.createElement('label');
+            rowLabel.textContent = label;
+            rowLabel.htmlFor = id;
+            const input = createInput(id, String(value));
+            input.type = 'number';
+            input.min = '0';
+            input.step = '100';
+            input.value = String(value);
+            input.addEventListener('input', () => {
+                updateGlobalBatchConfig({ [key]: input.value });
+            });
+            row.appendChild(rowLabel);
+            row.appendChild(input);
+            return row;
+        }
+
+        navGrid.appendChild(navToggleRow);
+        navGrid.appendChild(createWaitRow('pcm-nav-before-home-wait', '点商家首页前等待(ms)', batchConfig.beforeHomeClickWait, 'beforeHomeClickWait'));
+        navGrid.appendChild(createWaitRow('pcm-nav-home-wait', '点商家首页后等待(ms)', batchConfig.homeClickWait, 'homeClickWait'));
+        navGrid.appendChild(createWaitRow('pcm-nav-publish-wait', '点发布视频后等待(ms)', batchConfig.publishClickWait, 'publishClickWait'));
+        navGrid.appendChild(createWaitRow('pcm-nav-upload-ready-wait', '上传区就绪后等待(ms)', batchConfig.uploadReadyWait, 'uploadReadyWait'));
+        navGrid.appendChild(createWaitRow('pcm-nav-queue-wait', '商品间切换等待(ms)', batchConfig.queueTransitionWait, 'queueTransitionWait'));
+        navGrid.appendChild(createWaitRow('pcm-nav-batch-wait', '批次间切换等待(ms)', batchConfig.batchTransitionWait, 'batchTransitionWait'));
+        body.appendChild(navGrid);
         card.appendChild(header);
         card.appendChild(body);
         return card;
@@ -2772,6 +2857,7 @@
 
         if (!state.mounted) {
             injectStyles();
+            state.globalBatchConfig = loadGlobalBatchConfig();
             await loadSnapshotsFromDb();
 
             const root = createRootV2();
