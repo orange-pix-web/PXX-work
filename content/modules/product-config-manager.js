@@ -37,8 +37,8 @@
         folderHintEl: null,
         hiddenDirectoryInput: null,
         folderSnapshots: {},
-        liveFiles: {},
-        persistedFiles: {},
+        runtimeFiles: {},
+        persistedFileMeta: {},
         directoryHandles: {},
         logListeners: new Set(),
         schedulerRunning: false,
@@ -61,6 +61,26 @@
         return fileLike instanceof File &&
             isVideoFile(fileLike) &&
             Number(fileLike.size || 0) > MIN_VALID_VIDEO_SIZE;
+    }
+
+    function buildPersistedFileMeta(file) {
+        return {
+            name: String(file?.name || ''),
+            size: Number(file?.size || 0),
+            type: String(file?.type || ''),
+            lastModified: Number(file?.lastModified || 0),
+            webkitRelativePath: String(file?.webkitRelativePath || ''),
+            relativePath: String(file?.webkitRelativePath || file?.relativePath || file?.name || '')
+        };
+    }
+
+    function isPersistedFileMeta(fileMeta) {
+        return Boolean(
+            fileMeta &&
+            typeof fileMeta.name === 'string' &&
+            Number(fileMeta.size || 0) > MIN_VALID_VIDEO_SIZE &&
+            VIDEO_EXTENSIONS.some((ext) => fileMeta.name.toLowerCase().endsWith(ext))
+        );
     }
 
     function toNumber(value, fallback) {
@@ -211,10 +231,10 @@
                 if (!row?.productId || !row.handle) return;
                 state.directoryHandles[row.productId] = row.handle;
             });
-            state.persistedFiles = {};
+            state.persistedFileMeta = {};
             rows.files.forEach((row) => {
                 if (!row?.productId || !Array.isArray(row.files)) return;
-                state.persistedFiles[row.productId] = row.files.filter(isValidResolvedVideoFile);
+                state.persistedFileMeta[row.productId] = row.files.filter(isPersistedFileMeta).map(buildPersistedFileMeta);
             });
         } catch (error) {
             console.error('[PDD插件] 读取目录缓存失败', error);
@@ -277,17 +297,24 @@
         }
     }
 
-    async function saveResolvedFilesToDb(productId, files, folderName) {
+    async function saveResolvedFileMetaToDb(productId, files, folderName) {
+        const fileMeta = Array.isArray(files)
+            ? files
+                .filter((file) => isValidResolvedVideoFile(file) || isPersistedFileMeta(file))
+                .map(buildPersistedFileMeta)
+                .filter(isPersistedFileMeta)
+            : [];
         try {
             const db = await openDb();
             await new Promise((resolve, reject) => {
                 const transaction = db.transaction(FILE_STORE, 'readwrite');
                 const store = transaction.objectStore(FILE_STORE);
-                const request = Array.isArray(files) && files.length
+                const request = fileMeta.length
                     ? store.put({
                         productId,
                         folderName: folderName || '',
-                        files,
+                        files: fileMeta,
+                        metadataOnly: true,
                         updatedAt: Date.now()
                     })
                     : store.delete(productId);
@@ -295,7 +322,7 @@
                 request.onerror = () => reject(request.error);
             });
         } catch (error) {
-            console.error('[PDD插件] 保存文件缓存失败', error);
+            console.error('[PDD插件] 保存文件元数据失败', error);
         }
     }
 
@@ -487,7 +514,7 @@
         try {
             if (typeof window.showDirectoryPicker === 'function') {
                 await openDirectoryPickerForCurrentProduct();
-                return Boolean(state.liveFiles[productId]?.length || state.persistedFiles[productId]?.length || state.directoryHandles[productId]);
+                return Boolean(state.runtimeFiles[productId]?.length || state.directoryHandles[productId]);
             }
         } catch (error) {
             console.error('[PDD插件] 自动重绑定失败', error);
@@ -546,10 +573,9 @@
         if (forceFreshScan) {
             if (!handle || !(await requestDirectoryPermission(handle))) {
                 const fallbackFiles = dedupeResolvedFiles([
-                    ...(state.liveFiles[productId] || []),
-                    ...(state.persistedFiles[productId] || [])
+                    ...(state.runtimeFiles[productId] || [])
                 ].filter(isValidResolvedVideoFile));
-            const folderName = fallbackFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || '';
+                const folderName = fallbackFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || '';
                 const totalSize = fallbackFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
                 logEvent('scan_debug', fallbackFiles.length ? '[SCAN] fresh scan fallback once' : '[SCAN] fresh scan failed: folder handle unavailable', {
                     productId,
@@ -565,9 +591,14 @@
                     fileCount: fallbackFiles.length,
                     totalSizeBytes: totalSize
                 });
-                return createResolvedFilePayload(fallbackFiles, fallbackFiles.length ? 'fresh-fallback-once' : 'fresh-scan-unavailable', folderName, {
+                const persistedFileMeta = fallbackFiles.length ? [] : (state.persistedFileMeta[productId] || []);
+                const snapshot = fallbackFiles.length ? null : cloneSnapshot(state.folderSnapshots[productId]);
+                return createResolvedFilePayload(fallbackFiles, fallbackFiles.length ? 'fresh-fallback-once' : persistedFileMeta.length ? 'metadata-only' : 'fresh-scan-unavailable', folderName || snapshot?.folderName || '', {
                     handleValid: false,
-                    forceFreshScan: true
+                    forceFreshScan: true,
+                    needsRebind: Boolean(persistedFileMeta.length),
+                    fileMeta: persistedFileMeta.map(buildPersistedFileMeta),
+                    snapshot
                 });
             }
 
@@ -577,8 +608,7 @@
             } catch (error) {
                 await invalidateDirectoryHandle(productId, 'fresh-scan-handle-error', error);
                 const fallbackFiles = dedupeResolvedFiles([
-                    ...(state.liveFiles[productId] || []),
-                    ...(state.persistedFiles[productId] || [])
+                    ...(state.runtimeFiles[productId] || [])
                 ].filter(isValidResolvedVideoFile));
                 const folderName = fallbackFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || state.folderSnapshots[productId]?.folderName || '';
                 const totalSize = fallbackFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
@@ -607,19 +637,24 @@
                 if (rebound) {
                     return getResolvedVideoFiles(productId, options);
                 }
-                return createResolvedFilePayload([], 'fresh-handle-error', folderName, {
+                const persistedFileMeta = state.persistedFileMeta[productId] || [];
+                const snapshot = cloneSnapshot(state.folderSnapshots[productId]);
+                return createResolvedFilePayload([], persistedFileMeta.length ? 'metadata-only' : 'fresh-handle-error', folderName || snapshot?.folderName || '', {
                     handleValid: false,
                     forceFreshScan: true,
+                    needsRebind: Boolean(persistedFileMeta.length),
+                    fileMeta: persistedFileMeta.map(buildPersistedFileMeta),
+                    snapshot,
                     error: error?.message || String(error || '')
                 });
             }
             const folderName = handle.name || config.videoFolderPath || '';
             const snapshot = createSnapshotFromFiles(folderName, handleFiles.map(buildVideoMeta));
-            state.persistedFiles[productId] = handleFiles;
+            state.runtimeFiles[productId] = handleFiles;
+            state.persistedFileMeta[productId] = handleFiles.map(buildPersistedFileMeta);
             state.folderSnapshots[productId] = snapshot;
-            delete state.liveFiles[productId];
             await saveSnapshotToDb(productId, snapshot);
-            await saveResolvedFilesToDb(productId, handleFiles, folderName);
+            await saveResolvedFileMetaToDb(productId, handleFiles, folderName);
             const totalSize = handleFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
             logEvent('scan_debug', '[SCAN] fresh scan executed', {
                 productId,
@@ -644,7 +679,7 @@
             });
         }
 
-        const memoryFiles = state.liveFiles[productId] || [];
+        const memoryFiles = state.runtimeFiles[productId] || [];
         if (memoryFiles.length) {
             const folderName = memoryFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || '';
             logEvent('scan_debug', '扫描调试', {
@@ -658,36 +693,41 @@
             return createResolvedFilePayload(memoryFiles, 'memory-cache', folderName);
         }
 
-        const persistedFiles = state.persistedFiles[productId] || [];
-        if (persistedFiles.length) {
-            const folderName = persistedFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || '';
+        const persistedFileMeta = state.persistedFileMeta[productId] || [];
+        if (persistedFileMeta.length && !handle) {
+            const snapshot = cloneSnapshot(state.folderSnapshots[productId]);
+            const folderName = snapshot?.folderName || config.videoFolderPath || '';
             logEvent('scan_debug', '扫描调试', {
                 productId,
                 folderPath: folderName,
-                rawFiles: persistedFiles.length,
-                filteredFiles: persistedFiles.filter(isValidResolvedVideoFile).length,
-                cacheHit: 'indexeddb-files',
+                rawFiles: persistedFileMeta.length,
+                filteredFiles: persistedFileMeta.length,
+                cacheHit: 'metadata-only',
                 handleValid: false
             });
-            return createResolvedFilePayload(persistedFiles, 'indexeddb-files', folderName);
+            return createResolvedFilePayload([], 'metadata-only', folderName, {
+                needsRebind: true,
+                fileMeta: persistedFileMeta.map(buildPersistedFileMeta),
+                snapshot
+            });
         }
 
-        if (!handle || !(await requestDirectoryPermission(handle))) {
+        const handleReady = Boolean(handle && await requestDirectoryPermission(handle));
+        if (!handleReady) {
             const rebound = await triggerRebindFlow(productId, !handle ? 'missing-handle' : 'permission-denied');
             if (rebound) {
                 return getResolvedVideoFiles(productId, options);
             }
         }
 
-        if (handle) {
+        if (handleReady) {
             let handleFiles = [];
             try {
                 handleFiles = await collectVideoFilesFromDirectoryHandle(handle);
             } catch (error) {
                 await invalidateDirectoryHandle(productId, 'handle-scan-error', error);
                 const fallbackFiles = dedupeResolvedFiles([
-                    ...(state.liveFiles[productId] || []),
-                    ...(state.persistedFiles[productId] || [])
+                    ...(state.runtimeFiles[productId] || [])
                 ].filter(isValidResolvedVideoFile));
                 if (fallbackFiles.length) {
                     const fallbackFolder = fallbackFiles[0]?.webkitRelativePath?.split('/')[0] || config.videoFolderPath || state.folderSnapshots[productId]?.folderName || '';
@@ -708,11 +748,12 @@
             }
             const folderName = handle.name || config.videoFolderPath || '';
             if (handleFiles.length) {
-                state.persistedFiles[productId] = handleFiles.filter(isValidResolvedVideoFile);
-                const snapshot = createSnapshotFromFiles(folderName, handleFiles.map(buildVideoMeta));
+                state.runtimeFiles[productId] = handleFiles.filter(isValidResolvedVideoFile);
+                state.persistedFileMeta[productId] = state.runtimeFiles[productId].map(buildPersistedFileMeta);
+                const snapshot = createSnapshotFromFiles(folderName, state.runtimeFiles[productId].map(buildVideoMeta));
                 state.folderSnapshots[productId] = snapshot;
                 await saveSnapshotToDb(productId, snapshot);
-                await saveResolvedFilesToDb(productId, handleFiles, folderName);
+                await saveResolvedFileMetaToDb(productId, state.runtimeFiles[productId], folderName);
                 logEvent('scan_debug', '扫描调试', {
                     productId,
                     folderPath: folderName,
@@ -739,7 +780,10 @@
             });
         }
 
-        return createResolvedFilePayload([], snapshot?.files?.length ? 'indexeddb-snapshot' : 'unresolved', snapshot?.folderName || config.videoFolderPath || '', {
+        const persistedMetaForSnapshot = state.persistedFileMeta[productId] || [];
+        return createResolvedFilePayload([], persistedMetaForSnapshot.length || snapshot?.files?.length ? 'metadata-only' : 'unresolved', snapshot?.folderName || config.videoFolderPath || '', {
+            needsRebind: Boolean(persistedMetaForSnapshot.length || snapshot?.files?.length),
+            fileMeta: persistedMetaForSnapshot.map(buildPersistedFileMeta),
             snapshot
         });
     }
@@ -770,9 +814,9 @@
     }
 
     function getSnapshotForProduct(productId) {
-        if (state.liveFiles[productId]?.length) {
-            const files = state.liveFiles[productId].map(buildVideoMeta);
-            const folderName = state.liveFiles[productId][0]?.webkitRelativePath?.split('/')[0] || state.currentFolderMeta?.folderName || '';
+        if (state.runtimeFiles[productId]?.length) {
+            const files = state.runtimeFiles[productId].map(buildVideoMeta);
+            const folderName = state.runtimeFiles[productId][0]?.webkitRelativePath?.split('/')[0] || state.currentFolderMeta?.folderName || '';
             return {
                 folderName,
                 fileCount: files.length,
@@ -781,9 +825,9 @@
             };
         }
 
-        if (state.persistedFiles[productId]?.length) {
-            const files = state.persistedFiles[productId].map(buildVideoMeta);
-            const folderName = state.persistedFiles[productId][0]?.webkitRelativePath?.split('/')[0] || state.currentFolderMeta?.folderName || '';
+        if (state.persistedFileMeta[productId]?.length) {
+            const files = state.persistedFileMeta[productId].map(buildPersistedFileMeta);
+            const folderName = state.folderSnapshots[productId]?.folderName || state.currentFolderMeta?.folderName || '';
             return {
                 folderName,
                 fileCount: files.length,
@@ -1486,8 +1530,8 @@
         }
 
         const validFiles = files.filter(isValidResolvedVideoFile);
-        state.liveFiles[productId] = validFiles;
-        state.persistedFiles[productId] = validFiles;
+        state.runtimeFiles[productId] = validFiles;
+        state.persistedFileMeta[productId] = validFiles.map(buildPersistedFileMeta);
         const folderName = files[0]?.webkitRelativePath?.split('/')[0] || getFormEl('pcm-folder-path')?.value || '';
         const snapshot = {
             folderName,
@@ -1507,7 +1551,7 @@
             fileCount: validFiles.length
         });
         await saveSnapshotToDb(productId, snapshot);
-        await saveResolvedFilesToDb(productId, validFiles, folderName);
+        await saveResolvedFileMetaToDb(productId, validFiles, folderName);
         await saveDirectoryHandleToDb(productId, null, folderName);
         renderConfigListV2();
         event.target.value = '';
@@ -1555,9 +1599,9 @@
             const snapshot = createSnapshotFromFiles(handle.name || '', validFiles.map(buildVideoMeta));
             state.directoryHandles[productId] = handle;
             state.folderSnapshots[productId] = snapshot;
-            state.persistedFiles[productId] = validFiles;
+            state.runtimeFiles[productId] = validFiles;
+            state.persistedFileMeta[productId] = validFiles.map(buildPersistedFileMeta);
             state.currentFolderMeta = snapshot;
-            delete state.liveFiles[productId];
             getFormEl('pcm-folder-path').value = snapshot.folderName;
             updateFolderHint();
             syncCreateConfigModalFolderDisplay();
@@ -1568,7 +1612,7 @@
                 handleStored: true
             });
             await saveSnapshotToDb(productId, snapshot);
-            await saveResolvedFilesToDb(productId, validFiles, snapshot.folderName);
+            await saveResolvedFileMetaToDb(productId, validFiles, snapshot.folderName);
             await saveDirectoryHandleToDb(productId, handle, snapshot.folderName);
             renderConfigListV2();
         } catch (error) {
@@ -1583,8 +1627,8 @@
     function removeConfig(productId) {
         const nextConfigs = loadConfigs().filter((item) => item.productId !== productId);
         saveConfigs(nextConfigs);
-        delete state.liveFiles[productId];
-        delete state.persistedFiles[productId];
+        delete state.runtimeFiles[productId];
+        delete state.persistedFileMeta[productId];
         delete state.folderSnapshots[productId];
         state.selectedProductIds = state.selectedProductIds.filter((id) => id !== productId);
         deleteSnapshotFromDb(productId);
@@ -2388,7 +2432,7 @@
         const persistentRow = document.createElement('div');
         persistentRow.className = 'pcm-row';
         const persistentLabel = document.createElement('label');
-        persistentLabel.textContent = '永久保存';
+        persistentLabel.textContent = '保存配置';
         persistentRow.appendChild(persistentLabel);
         const persistentWrap = document.createElement('label');
         persistentWrap.className = 'pcm-switch';
@@ -2397,7 +2441,7 @@
         persistentInput.id = 'pcm-persistent';
         persistentInput.checked = true;
         const persistentText = document.createElement('span');
-        persistentText.textContent = '启用配置持久化';
+        persistentText.textContent = '仅保存配置和文件列表，不保存视频文件';
         persistentWrap.appendChild(persistentInput);
         persistentWrap.appendChild(persistentText);
         persistentRow.appendChild(persistentWrap);
