@@ -46,8 +46,10 @@
             ];
             const PRODUCT_CONFIG_STORAGE_KEY = 'pdd_product_config_manager_configs';
             const PRODUCT_CONFIG_DB_NAME = 'pdd-product-config-manager';
-            const PRODUCT_CONFIG_DB_VERSION = 2;
+            const PRODUCT_CONFIG_DB_VERSION = 4;
+            const PRODUCT_SNAPSHOT_STORE = 'folderSnapshots';
             const PRODUCT_HANDLE_STORE = 'folderHandles';
+            const PRODUCT_LEGACY_FILE_STORE = 'resolvedVideoFiles';
             const PRODUCT_VIDEO_EXTENSIONS = ['.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm'];
             const BATCH_STATES = [
                 'INIT',
@@ -724,6 +726,18 @@
             function openProductConfigDb() {
                 return new Promise((resolve, reject) => {
                     const request = indexedDB.open(PRODUCT_CONFIG_DB_NAME, PRODUCT_CONFIG_DB_VERSION);
+                    request.onupgradeneeded = () => {
+                        const db = request.result;
+                        if (!db.objectStoreNames.contains(PRODUCT_SNAPSHOT_STORE)) {
+                            db.createObjectStore(PRODUCT_SNAPSHOT_STORE, { keyPath: 'productId' });
+                        }
+                        if (!db.objectStoreNames.contains(PRODUCT_HANDLE_STORE)) {
+                            db.createObjectStore(PRODUCT_HANDLE_STORE, { keyPath: 'productId' });
+                        }
+                        if (db.objectStoreNames.contains(PRODUCT_LEGACY_FILE_STORE)) {
+                            db.deleteObjectStore(PRODUCT_LEGACY_FILE_STORE);
+                        }
+                    };
                     request.onsuccess = () => resolve(request.result);
                     request.onerror = () => reject(request.error);
                 });

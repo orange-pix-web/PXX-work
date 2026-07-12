@@ -4,10 +4,9 @@
     const ROOT_ID = 'product-config-manager-root';
     const STORAGE_KEY = 'pdd_product_config_manager_configs';
     const DB_NAME = 'pdd-product-config-manager';
-    const DB_VERSION = 3;
+    const DB_VERSION = 4;
     const SNAPSHOT_STORE = 'folderSnapshots';
     const HANDLE_STORE = 'folderHandles';
-    const FILE_STORE = 'resolvedVideoFiles';
     const BATCH_CONFIG_STORAGE_KEY = 'pdd_product_config_manager_batch_config';
     const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm'];
     const MIN_VALID_VIDEO_SIZE = 10 * 1024;
@@ -180,8 +179,8 @@
                 if (!db.objectStoreNames.contains(HANDLE_STORE)) {
                     db.createObjectStore(HANDLE_STORE, { keyPath: 'productId' });
                 }
-                if (!db.objectStoreNames.contains(FILE_STORE)) {
-                    db.createObjectStore(FILE_STORE, { keyPath: 'productId' });
+                if (db.objectStoreNames.contains('resolvedVideoFiles')) {
+                    db.deleteObjectStore('resolvedVideoFiles');
                 }
             };
             request.onsuccess = () => resolve(request.result);
@@ -193,14 +192,12 @@
         try {
             const db = await openDb();
             const rows = await new Promise((resolve, reject) => {
-                const transaction = db.transaction([SNAPSHOT_STORE, HANDLE_STORE, FILE_STORE], 'readonly');
+                const transaction = db.transaction([SNAPSHOT_STORE, HANDLE_STORE], 'readonly');
                 const snapshotStore = transaction.objectStore(SNAPSHOT_STORE);
                 const handleStore = transaction.objectStore(HANDLE_STORE);
-                const fileStore = transaction.objectStore(FILE_STORE);
                 const snapshotRequest = snapshotStore.getAll();
                 const handleRequest = handleStore.getAll();
-                const fileRequest = fileStore.getAll();
-                const result = { snapshots: [], handles: [], files: [] };
+                const result = { snapshots: [], handles: [] };
 
                 snapshotRequest.onsuccess = () => {
                     result.snapshots = snapshotRequest.result || [];
@@ -211,11 +208,6 @@
                     result.handles = handleRequest.result || [];
                 };
                 handleRequest.onerror = () => reject(handleRequest.error);
-
-                fileRequest.onsuccess = () => {
-                    result.files = fileRequest.result || [];
-                };
-                fileRequest.onerror = () => reject(fileRequest.error);
 
                 transaction.oncomplete = () => resolve(result);
                 transaction.onerror = () => reject(transaction.error);
@@ -232,9 +224,11 @@
                 state.directoryHandles[row.productId] = row.handle;
             });
             state.persistedFileMeta = {};
-            rows.files.forEach((row) => {
-                if (!row?.productId || !Array.isArray(row.files)) return;
-                state.persistedFileMeta[row.productId] = row.files.filter(isPersistedFileMeta).map(buildPersistedFileMeta);
+            Object.entries(state.folderSnapshots).forEach(([productId, snapshot]) => {
+                const files = Array.isArray(snapshot?.files) ? snapshot.files.filter(isPersistedFileMeta).map(buildPersistedFileMeta) : [];
+                if (files.length) {
+                    state.persistedFileMeta[productId] = files;
+                }
             });
         } catch (error) {
             console.error('[PDD插件] 读取目录缓存失败', error);
@@ -260,13 +254,11 @@
         try {
             const db = await openDb();
             await new Promise((resolve, reject) => {
-                const transaction = db.transaction([SNAPSHOT_STORE, HANDLE_STORE, FILE_STORE], 'readwrite');
+                const transaction = db.transaction([SNAPSHOT_STORE, HANDLE_STORE], 'readwrite');
                 const snapshotStore = transaction.objectStore(SNAPSHOT_STORE);
                 const handleStore = transaction.objectStore(HANDLE_STORE);
-                const fileStore = transaction.objectStore(FILE_STORE);
                 snapshotStore.delete(productId);
                 handleStore.delete(productId);
-                fileStore.delete(productId);
                 transaction.oncomplete = () => resolve();
                 transaction.onerror = () => reject(transaction.error);
             });
@@ -304,25 +296,12 @@
                 .map(buildPersistedFileMeta)
                 .filter(isPersistedFileMeta)
             : [];
-        try {
-            const db = await openDb();
-            await new Promise((resolve, reject) => {
-                const transaction = db.transaction(FILE_STORE, 'readwrite');
-                const store = transaction.objectStore(FILE_STORE);
-                const request = fileMeta.length
-                    ? store.put({
-                        productId,
-                        folderName: folderName || '',
-                        files: fileMeta,
-                        metadataOnly: true,
-                        updatedAt: Date.now()
-                    })
-                    : store.delete(productId);
-                request.onsuccess = () => resolve();
-                request.onerror = () => reject(request.error);
-            });
-        } catch (error) {
-            console.error('[PDD插件] 保存文件元数据失败', error);
+        if (productId) {
+            if (fileMeta.length) {
+                state.persistedFileMeta[productId] = fileMeta;
+            } else {
+                delete state.persistedFileMeta[productId];
+            }
         }
     }
 
