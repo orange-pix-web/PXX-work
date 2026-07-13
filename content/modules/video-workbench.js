@@ -2629,7 +2629,7 @@
             panel.dataset.pddModule = 'video-workbench';
             panel.innerHTML = `
                 <div class="ws-header">
-                    <span id="video-workbench-title">视频工作台 V0.2.4</span>
+                    <span id="video-workbench-title">视频工作台 V0.2.5</span>
                     <div>
                         <span id="video-workbench-close" style="cursor:pointer; font-size: 18px; line-height: 1;">×</span>
                     </div>
@@ -2851,15 +2851,19 @@
                 'manual-task-chk-declare': 'task-chk-declare',
                 'manual-task-chk-cover': 'task-chk-cover'
             };
+            let isManualConfigSyncing = false;
 
             function syncElementValue(source, target, emit = true) {
                 if (!source || !target) return;
+                let changed = false;
                 if (source.type === 'checkbox') {
+                    changed = target.checked !== source.checked;
                     target.checked = source.checked;
                 } else {
+                    changed = target.value !== source.value;
                     target.value = source.value;
                 }
-                if (emit) {
+                if (emit && changed) {
                     ['input', 'change'].forEach((eventName) => {
                         target.dispatchEvent(new Event(eventName, { bubbles: true }));
                     });
@@ -2867,9 +2871,15 @@
             }
 
             function syncManualConfigToLegacy() {
-                Object.entries(MANUAL_TO_LEGACY_IDS).forEach(([manualId, legacyId]) => {
-                    syncElementValue(document.getElementById(manualId), document.getElementById(legacyId));
-                });
+                if (isManualConfigSyncing) return;
+                isManualConfigSyncing = true;
+                try {
+                    Object.entries(MANUAL_TO_LEGACY_IDS).forEach(([manualId, legacyId]) => {
+                        syncElementValue(document.getElementById(manualId), document.getElementById(legacyId));
+                    });
+                } finally {
+                    isManualConfigSyncing = false;
+                }
             }
 
             function syncLegacyConfigToManual() {
@@ -2938,10 +2948,16 @@
                     return;
                 }
 
+                const idEnabled = Boolean(document.getElementById('task-chk-id')?.checked);
+                const titleEnabled = Boolean(document.getElementById('task-chk-title')?.checked);
                 const productId = document.getElementById('pub-id')?.value.trim();
                 const title = document.getElementById('pub-title')?.value || '';
-                if (!productId) {
+                if (idEnabled && !productId) {
                     addLog('[手动发布] 请先输入商品 ID', 'error');
+                    return;
+                }
+                if (titleEnabled && !title) {
+                    addLog('[手动发布] 请先输入标题，或取消勾选“标题”任务', 'error');
                     return;
                 }
 
@@ -2951,7 +2967,8 @@
                     return;
                 }
 
-                const manualSummary = createRunSummary(productId, 'manual');
+                const summaryProductId = productId || `manual-${Date.now()}`;
+                const manualSummary = createRunSummary(summaryProductId, 'manual');
                 const manualFiles = collectManualExistingVideoCards()
                     .slice(0, expectedCount)
                     .map((item, index) => ({
@@ -2978,9 +2995,11 @@
                 let flowReason = 'unknown-failure';
                 moduleApi.lastRunResult = null;
                 try {
-                    const memory = JSON.parse(localStorage.getItem(MEMORY_KEY) || '{}');
-                    memory[productId] = title;
-                    localStorage.setItem(MEMORY_KEY, JSON.stringify(memory));
+                    if (productId && title) {
+                        const memory = JSON.parse(localStorage.getItem(MEMORY_KEY) || '{}');
+                        memory[productId] = title;
+                        localStorage.setItem(MEMORY_KEY, JSON.stringify(memory));
+                    }
                     prepareManualExistingVideoBatch(expectedCount);
                     const fillReady = await runFillPhase();
                     if (!fillReady) {
@@ -4527,7 +4546,18 @@
                 const memory = JSON.parse(localStorage.getItem(MEMORY_KEY) || '{}');
                 const val = e.target.value.trim();
                 if (memory[val]) {
-                    document.getElementById('pub-title').value = memory[val];
+                    const legacyTitle = document.getElementById('pub-title');
+                    const manualTitle = document.getElementById('manual-pub-title');
+                    if (legacyTitle) {
+                        legacyTitle.value = memory[val];
+                    }
+                    if (manualTitle) {
+                        manualTitle.value = memory[val];
+                    }
+                    [legacyTitle].filter(Boolean).forEach((element) => {
+                        element.dispatchEvent(new Event('input', { bubbles: true }));
+                        element.dispatchEvent(new Event('change', { bubbles: true }));
+                    });
                     addLog('匹配到历史标题', 'info');
                 }
             };
