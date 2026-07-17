@@ -8,6 +8,7 @@
     const SNAPSHOT_STORE = 'folderSnapshots';
     const HANDLE_STORE = 'folderHandles';
     const BATCH_CONFIG_STORAGE_KEY = 'pdd_product_config_manager_batch_config';
+    const UPLOAD_PROGRESS_KEY = 'pdd_video_upload_progress_v1';
     const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm'];
     const MIN_VALID_VIDEO_SIZE = 10 * 1024;
     const DEFAULT_GLOBAL_BATCH_CONFIG = {
@@ -39,6 +40,7 @@
         runtimeFiles: {},
         persistedFileMeta: {},
         directoryHandles: {},
+        directoryPermissionStatus: {},
         logListeners: new Set(),
         schedulerRunning: false,
         stopRequested: false,
@@ -166,6 +168,191 @@
 
     function saveConfigs(configs) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(configs));
+    }
+
+    function loadUploadProgressStore() {
+        try {
+            const raw = JSON.parse(localStorage.getItem(UPLOAD_PROGRESS_KEY) || '{}');
+            return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+        } catch (error) {
+            console.error('[PDD插件] 读取上传记录失败', error);
+            return {};
+        }
+    }
+
+    function saveUploadProgressStore(store) {
+        localStorage.setItem(UPLOAD_PROGRESS_KEY, JSON.stringify(store || {}));
+    }
+
+    function getActionTargetConfigs() {
+        const selectedConfigs = getSelectedConfigs();
+        if (selectedConfigs.length) return selectedConfigs;
+        const formConfig = getFormValues();
+        if (!formConfig.productId) return [];
+        const savedConfig = loadConfigs().find((item) => item.productId === formConfig.productId);
+        return [savedConfig || formConfig];
+    }
+
+    function clearUploadProgressForProducts(productIds) {
+        const ids = Array.from(new Set((productIds || []).map((id) => String(id || '').trim()).filter(Boolean)));
+        if (!ids.length) return 0;
+        const store = loadUploadProgressStore();
+        let clearedCount = 0;
+        ids.forEach((productId) => {
+            if (store[productId]) {
+                delete store[productId];
+                clearedCount += 1;
+            }
+        });
+        saveUploadProgressStore(store);
+        return clearedCount;
+    }
+
+    async function retryPendingUploadTasks() {
+        if (state.schedulerRunning) {
+            setStatusAndLog('批量发布正在执行中', 'error');
+            return;
+        }
+        const configs = getActionTargetConfigs();
+        if (!configs.length) {
+            setStatusAndLog('请先勾选商品，或在表单中填写商品 ID', 'error');
+            return;
+        }
+        const productIds = configs.map((config) => config.productId).filter(Boolean);
+        state.schedulerRunning = true;
+        state.stopRequested = false;
+        renderConfigListV2();
+        setStatusAndLog(`开始重试未上传任务：${productIds.join(', ')}`, 'info', {
+            productIds
+        });
+        try {
+            const queueResult = await executeProductQueue(configs.slice());
+            if (state.stopRequested) {
+                setStatusAndLog('重试任务已停止', 'error', {
+                    remainingQueueLength: Math.max(configs.length - queueResult.productIndex, 0)
+                });
+                return;
+            }
+            const doneCount = queueResult.results.filter((result) => result?.status === 'done').length;
+            const failCount = queueResult.results.filter((result) => result?.status === 'fail').length;
+            setStatusAndLog('重试未上传任务完成', failCount ? 'error' : 'success', {
+                totalProducts: queueResult.results.length,
+                doneCount,
+                failCount
+            });
+        } finally {
+            state.schedulerRunning = false;
+            state.stopRequested = false;
+            renderConfigListV2();
+        }
+    }
+
+    function clearSelectedUploadProgress() {
+        const configs = getActionTargetConfigs();
+        const productIds = configs.map((config) => config.productId).filter(Boolean);
+        if (!productIds.length) {
+            setStatusAndLog('请先勾选商品，或在表单中填写商品 ID', 'error');
+            return;
+        }
+        const label = productIds.length === 1 ? productIds[0] : `${productIds.length} 个商品`;
+        if (!window.confirm(`确定清除 ${label} 的上传记录吗？清除后相同视频会从头重新上传。`)) {
+            return;
+        }
+        const clearedCount = clearUploadProgressForProducts(productIds);
+        setStatusAndLog(`已清除上传记录：${clearedCount}/${productIds.length}`, clearedCount ? 'success' : 'info', {
+            productIds,
+            clearedCount
+        });
+        renderConfigListV2();
+    }
+
+    function getPermissionCheckTargetConfigs() {
+        const selectedConfigs = getSelectedConfigs();
+        if (selectedConfigs.length) return selectedConfigs;
+        const savedConfigs = loadConfigs();
+        if (savedConfigs.length) return savedConfigs;
+        const formConfig = getFormValues();
+        return formConfig.productId ? [formConfig] : [];
+    }
+
+    function getDirectoryStatusLabel(status) {
+        const labels = {
+            valid: '目录有效',
+            prompt: '需授权',
+            denied: '权限被拒',
+            missing: '需重新选择',
+            unconfigured: '未配置',
+            unsupported: '需重新选择',
+            error: '检查失败'
+        };
+        return labels[status] || '目录未检查';
+    }
+
+    function getDirectoryStatusText(config, snapshot, task) {
+        const productId = String(config?.productId || '');
+        const checked = state.directoryPermissionStatus[productId];
+        if (checked?.label) return checked.label;
+        if (state.directoryHandles[productId]) return '目录未检查';
+        const hasCachedFiles = Boolean(
+            snapshot?.files?.length ||
+            state.persistedFileMeta[productId]?.length ||
+            task?.scannedVideoCount
+        );
+        return hasCachedFiles ? '需重新选择' : '未配置';
+    }
+
+    async function queryDirectoryPermissionState(handle) {
+        if (!handle?.queryPermission) return 'unsupported';
+        try {
+            return await handle.queryPermission({ mode: 'read' });
+        } catch (error) {
+            console.error('[PDD插件] 检查目录权限失败', error);
+            return 'error';
+        }
+    }
+
+    async function checkDirectoryPermissions() {
+        const configs = getPermissionCheckTargetConfigs();
+        if (!configs.length) {
+            setStatusAndLog('请先保存至少一个商品配置', 'error');
+            return;
+        }
+
+        let validCount = 0;
+        let warningCount = 0;
+        const results = [];
+        for (const config of configs) {
+            const productId = String(config?.productId || '').trim();
+            if (!productId) continue;
+            const snapshot = getSnapshotForProduct(productId);
+            const handle = state.directoryHandles[productId] || null;
+            const hasCachedFiles = Boolean(snapshot?.files?.length || state.persistedFileMeta[productId]?.length);
+            let status = 'unconfigured';
+            if (handle) {
+                const permission = await queryDirectoryPermissionState(handle);
+                status = permission === 'granted' ? 'valid' : permission === 'prompt' ? 'prompt' : permission === 'denied' ? 'denied' : permission;
+            } else if (hasCachedFiles) {
+                status = 'missing';
+            }
+
+            const label = getDirectoryStatusLabel(status);
+            state.directoryPermissionStatus[productId] = {
+                status,
+                label,
+                checkedAt: Date.now()
+            };
+            if (status === 'valid') {
+                validCount += 1;
+            } else {
+                warningCount += 1;
+            }
+            results.push({ productId, status, label });
+        }
+
+        setStatusAndLog(`目录权限检查完成：有效 ${validCount}，需处理 ${warningCount}`, warningCount ? 'error' : 'success', {
+            results
+        });
+        renderConfigListV2();
     }
 
     function openDb() {
@@ -1836,8 +2023,7 @@
             const snapshot = getSnapshotForProduct(config.productId);
             const task = buildTask(effectiveConfig);
             const folderPath = getDisplayFolderPath(config, snapshot);
-            const configured = getFolderConfigured(config, snapshot);
-            const statusText = configured ? '已配置' : (task.scannedVideoCount ? '需重新选择' : '未配置');
+            const statusText = getDirectoryStatusText(config, snapshot, task);
             const collapsed = state.cardCollapsedMap[config.productId] !== false;
 
             const card = document.createElement('div');
@@ -2167,10 +2353,10 @@
             }
             #${ROOT_ID} .pcm-btn {
                 margin-bottom: 0;
-                padding: 8px 10px;
+                padding: 7px 9px;
                 font-size: 12px;
                 width: auto;
-                min-width: 88px;
+                min-width: 80px;
             }
             #${ROOT_ID} .pcm-btn--primary {
                 background: #1677ff;
@@ -2204,7 +2390,10 @@
                 margin-top: 10px;
                 display: flex;
                 flex-direction: column;
-                gap: 8px;
+                gap: 6px;
+                max-height: 520px;
+                overflow-y: auto;
+                padding-right: 2px;
             }
             #${ROOT_ID} .pcm-list-toolbar {
                 margin-top: 10px;
@@ -2235,7 +2424,7 @@
                 flex: 1;
             }
             #${ROOT_ID} .pcm-config-card {
-                padding: 8px;
+                padding: 7px;
                 border-radius: 8px;
                 background: #fff;
                 border: 1px solid #e5e7eb;
@@ -2245,17 +2434,40 @@
             }
             #${ROOT_ID} .pcm-config-card__meta {
                 display: grid;
-                gap: 6px;
-                margin-top: 8px;
-                font-size: 12px;
+                grid-template-columns: 1fr 1fr;
+                gap: 4px 8px;
+                margin-top: 6px;
+                padding-top: 6px;
+                border-top: 1px solid #eef2f7;
+                font-size: 11px;
                 color: #374151;
+            }
+            #${ROOT_ID} .pcm-config-card__meta div {
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
             }
             #${ROOT_ID} .pcm-config-card__editor {
                 display: grid;
-                gap: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
+                grid-template-columns: 1fr 1fr;
+                gap: 6px 8px;
+                margin-top: 8px;
+                padding-top: 8px;
                 border-top: 1px solid #e5e7eb;
+            }
+            #${ROOT_ID} .pcm-config-card__editor .pcm-row {
+                gap: 3px;
+            }
+            #${ROOT_ID} .pcm-config-card__editor .pcm-row:nth-child(3) {
+                grid-column: 1 / -1;
+            }
+            #${ROOT_ID} .pcm-config-card__editor textarea {
+                min-height: 44px;
+                max-height: 62px;
+            }
+            #${ROOT_ID} .pcm-config-card__actions {
+                margin-top: 8px;
             }
             #${ROOT_ID} .pcm-config-card__title {
                 display: flex;
@@ -2628,6 +2840,21 @@
         navGrid.appendChild(createWaitRow('pcm-nav-queue-wait', '商品间切换等待(ms)', batchConfig.queueTransitionWait, 'queueTransitionWait'));
         navGrid.appendChild(createWaitRow('pcm-nav-batch-wait', '批次间切换等待(ms)', batchConfig.batchTransitionWait, 'batchTransitionWait'));
         body.appendChild(navGrid);
+
+        const progressActions = document.createElement('div');
+        progressActions.className = 'pcm-toolbar pcm-progress-actions';
+        progressActions.style.marginTop = '8px';
+        const checkPermissionButton = createButton('检查目录权限', 'secondary');
+        checkPermissionButton.addEventListener('click', checkDirectoryPermissions);
+        const retryPendingButton = createButton('重试未上传任务', 'primary');
+        retryPendingButton.addEventListener('click', retryPendingUploadTasks);
+        const clearProgressButton = createButton('清除上传记录', 'danger');
+        clearProgressButton.addEventListener('click', clearSelectedUploadProgress);
+        progressActions.appendChild(checkPermissionButton);
+        progressActions.appendChild(retryPendingButton);
+        progressActions.appendChild(clearProgressButton);
+        body.appendChild(progressActions);
+
         card.appendChild(header);
         card.appendChild(body);
         return card;

@@ -34,6 +34,7 @@
             const executionLogs = [];
             let activeRunSummary = null;
             const MEMORY_KEY = 'pdd_video_helper_memory';
+            const UPLOAD_PROGRESS_KEY = 'pdd_video_upload_progress_v1';
             const DELAY_CONFIG_STORAGE_KEY = 'pdd_video_workbench_delay_config';
             const DELAY_CONFIG_IDS = [
                 'cfg-id-wait',
@@ -892,6 +893,61 @@
                 ].join('::');
             }
 
+            function loadUploadProgressStore() {
+                try {
+                    const raw = JSON.parse(localStorage.getItem(UPLOAD_PROGRESS_KEY) || '{}');
+                    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+                } catch (error) {
+                    addLog(`[断点续传] 读取进度失败：${error?.message || error}`, 'error');
+                    return {};
+                }
+            }
+
+            function saveUploadProgressStore(store) {
+                try {
+                    localStorage.setItem(UPLOAD_PROGRESS_KEY, JSON.stringify(store || {}));
+                } catch (error) {
+                    addLog(`[断点续传] 保存进度失败：${error?.message || error}`, 'error');
+                }
+            }
+
+            function getProductUploadProgress(productId) {
+                const store = loadUploadProgressStore();
+                return store[String(productId || '')] || { files: {} };
+            }
+
+            function getConfiguredFileKeys(productId) {
+                const progress = getProductUploadProgress(productId);
+                const files = progress?.files || {};
+                return new Set(Object.keys(files).filter((key) => files[key]?.status === 'configured'));
+            }
+
+            function markUploadProgress(productId, files, status, reason = '') {
+                if (!productId || !Array.isArray(files) || !files.length) return;
+                const store = loadUploadProgressStore();
+                const id = String(productId);
+                const productProgress = store[id] || { files: {} };
+                productProgress.files = productProgress.files || {};
+                const updatedAt = Date.now();
+                files.forEach((file) => {
+                    const key = getFileStableKey(file);
+                    if (!key.replace(/:/g, '').trim()) return;
+                    productProgress.files[key] = {
+                        key,
+                        status,
+                        reason,
+                        name: String(file?.name || ''),
+                        size: Number(file?.size || 0),
+                        lastModified: Number(file?.lastModified || 0),
+                        updatedAt
+                    };
+                });
+                productProgress.updatedAt = updatedAt;
+                store[id] = productProgress;
+                saveUploadProgressStore(store);
+                addLog(`[断点续传] 已标记 ${files.length} 个视频为 ${status}`, 'info');
+            }
+
             function filterDuplicateFiles(files, processedKeys = new Set()) {
                 const seen = new Set();
                 return Array.from(files || []).filter((file) => {
@@ -949,9 +1005,15 @@
                     return null;
                 }
 
-                const freshFiles = filterDuplicateFiles(resolved.files || [], batchLifecycle.processedFileKeys);
+                const dedupedFiles = filterDuplicateFiles(resolved.files || [], batchLifecycle.processedFileKeys);
+                const configuredKeys = getConfiguredFileKeys(productId);
+                const freshFiles = dedupedFiles.filter((file) => !configuredKeys.has(getFileStableKey(file)));
+                const skippedConfiguredCount = Math.max(0, dedupedFiles.length - freshFiles.length);
                 const freshSize = freshFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
                 addLog('[SCAN] fresh scan executed', 'info');
+                if (skippedConfiguredCount) {
+                    addLog(`[断点续传] 已跳过 ${skippedConfiguredCount} 个已填写信息的视频`, 'info');
+                }
                 addLog(`[SCAN] fileCount=${freshFiles.length} size=${formatMb(freshSize)}MB`, freshFiles.length ? 'info' : 'error');
                 timerEnd('scan', 'fileScan');
                 timerMark('scan_done');
@@ -960,6 +1022,7 @@
                     productId,
                     sourceType: resolved.sourceType,
                     fileCount: freshFiles.length,
+                    skippedConfiguredCount,
                     sizeBytes: freshSize,
                     skippedProcessed: Math.max(0, Number(resolved.count || 0) - freshFiles.length)
                 });
@@ -967,7 +1030,8 @@
                     ...resolved,
                     files: freshFiles,
                     count: freshFiles.length,
-                    size: freshSize
+                    size: freshSize,
+                    skippedConfiguredCount
                 };
             }
 
@@ -2037,7 +2101,20 @@
                         batchId
                     });
                     if (!scanned?.files?.length) {
+                        const skippedConfiguredCount = Number(scanned?.skippedConfiguredCount || 0);
                         if (i === 0) {
+                            if (skippedConfiguredCount > 0) {
+                                addLog(`[断点续传] 没有待上传视频，${skippedConfiguredCount} 个视频已填写信息`, 'success');
+                                return {
+                                    accepted: true,
+                                    reason: 'no-pending-files',
+                                    totalBatches: 0,
+                                    uploadedBatches: 0,
+                                    maxCount,
+                                    handledWorkflow: true,
+                                    summary: runSummary
+                                };
+                            }
                             return {
                                 accepted: false,
                                 reason: 'no-files',
@@ -2105,6 +2182,7 @@
                         };
                     }
 
+                    markUploadProgress(productId, batch.files, 'uploaded');
                     assertPhase('FILL_PHASE');
                     const fillReady = await runFillPhase();
                     if (!fillReady) {
@@ -2126,6 +2204,7 @@
                             summary: runSummary
                         };
                     }
+                    markUploadProgress(productId, batch.files, 'configured');
                     const publishReady = await runPublishPhase();
                     if (!publishReady) {
                         addRunSummaryBatch(runSummary, {
@@ -2629,7 +2708,7 @@
             panel.dataset.pddModule = 'video-workbench';
             panel.innerHTML = `
                 <div class="ws-header">
-                    <span id="video-workbench-title">视频工作台 V0.2.5</span>
+                    <span id="video-workbench-title">视频工作台 V0.27</span>
                     <div>
                         <span id="video-workbench-close" style="cursor:pointer; font-size: 18px; line-height: 1;">×</span>
                     </div>
