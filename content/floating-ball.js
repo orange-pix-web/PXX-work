@@ -4,8 +4,8 @@
   const ROOT_ID = 'pdd-extension-floating-root';
   const OPEN_CLASS = 'pdd-extension-floating-root--open';
   const PAGE_FEATURE_IDS = ['comment-auto-reply'];
-  const GLOBAL_FEATURE_IDS = ['video-workbench', 'video-monitor', 'video-download'];
-  const CONDITIONAL_FEATURE_IDS = ['video-manage-delete', 'promotion-goods-delete'];
+  const GLOBAL_FEATURE_IDS = ['video-workbench', 'video-monitor', 'video-download', 'data-manager'];
+  const CONDITIONAL_FEATURE_IDS = ['video-manage-delete', 'promotion-goods-delete', 'promotion-history-id-injector'];
 
   function createButton(className, text) {
     const button = document.createElement('button');
@@ -13,6 +13,18 @@
     button.className = className;
     button.textContent = text;
     return button;
+  }
+
+  function getFeatureTitle(feature) {
+    return typeof feature.title === 'function' ? feature.title() : feature.title;
+  }
+
+  function filterFeaturesForCurrentPage(features) {
+    const href = window.location.href;
+    if (href.includes('yingxiao.pinduoduo.com/goods/promotion/list')) {
+      return features.filter((feature) => feature.id !== 'promotion-history-id-injector');
+    }
+    return features;
   }
 
   function getCurrentPageMeta(features) {
@@ -78,11 +90,13 @@
   }
 
   function createSectionItem(root, feature, onAction) {
-    const item = createButton('pdd-extension-floating-menu__item', feature.title);
+    const item = createButton('pdd-extension-floating-menu__item', getFeatureTitle(feature));
     item.dataset.featureId = feature.id;
     item.addEventListener('click', () => {
       root.classList.remove(OPEN_CLASS);
-      onAction(feature);
+      Promise.resolve(onAction(feature)).finally(() => {
+        item.textContent = getFeatureTitle(feature);
+      });
     });
     return item;
   }
@@ -129,6 +143,8 @@
   }
 
   function renderMenu(root, features, onAction) {
+    features = filterFeaturesForCurrentPage(features);
+
     const panel = document.createElement('div');
     panel.className = 'pdd-extension-floating-menu';
     panel.style.minWidth = '260px';
@@ -170,7 +186,7 @@
   }
 
   function init(options) {
-    const features = options.features || [];
+    const features = filterFeaturesForCurrentPage(options.features || []);
     const onAction = options.onAction || function () {};
 
     const existingRoot = document.getElementById(ROOT_ID);

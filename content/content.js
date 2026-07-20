@@ -28,23 +28,29 @@
         { id: 'video-workbench', title: '视频工作台', action: startVideoWorkbench },
         { id: 'video-monitor', title: '视频监控', action: startVideoMonitor },
         { id: 'video-download', title: '视频批量下载', action: startVideoDownload },
+        { id: 'data-manager', title: '数据导入导出', action: startDataManager },
+        { id: 'promotion-history-id-injector', title: getPromotionHistoryIdInjectorTitle, action: startPromotionHistoryIdInjector },
         ...(isVideoManagePage() ? [{ id: 'video-manage-delete', title: '视频管理批量删除', action: startVideoManageDelete }] : [])
       ];
     }
 
     if (isCommentPage()) {
       return [
-        { id: 'comment-auto-reply', title: '评论自动回复', action: startCommentAutoReply }
+        { id: 'comment-auto-reply', title: '评论自动回复', action: startCommentAutoReply },
+        { id: 'data-manager', title: '数据导入导出', action: startDataManager }
       ];
     }
 
     if (isPromotionGoodsPage()) {
       return [
-        { id: 'promotion-goods-delete', title: '营销商品批量删除', action: startPromotionGoodsDelete }
+        { id: 'promotion-goods-delete', title: '营销商品批量删除', action: startPromotionGoodsDelete },
+        { id: 'data-manager', title: '数据导入导出', action: startDataManager }
       ];
     }
 
-    return [];
+    return [
+      { id: 'data-manager', title: '数据导入导出', action: startDataManager }
+    ];
   }
 
   async function openModule(moduleKey, errorMessage) {
@@ -87,6 +93,14 @@
     openModule('videoDownload', '[PDD插件] 视频批量下载模块不存在');
   }
 
+  function startDataManager() {
+    if (!window.PddModules?.dataManager?.init) {
+      console.error('[PDD插件] 数据导入导出模块不存在');
+      return;
+    }
+    openModule('dataManager', '[PDD插件] 数据导入导出模块不存在');
+  }
+
   function startVideoManageDelete() {
     if (!window.PddModules?.videoManageDelete?.init) {
       console.error('[PDD插件] 视频管理批量删除模块不存在');
@@ -111,10 +125,28 @@
     openModule('promotionGoodsDelete', '[PDD插件] 营销商品批量删除模块不存在');
   }
 
-  function init() {
+  function startPromotionHistoryIdInjector() {
+    if (!window.PddModules?.promotionHistoryIdInjector?.init) {
+      console.error('[PDD插件] 推广ID注入模块不存在');
+      return;
+    }
+    return openModule('promotionHistoryIdInjector', '[PDD插件] 推广ID注入模块不存在');
+  }
+
+  function getPromotionHistoryIdInjectorTitle() {
+    return window.PddModules?.promotionHistoryIdInjector?.getMenuTitle?.() || '推广ID注入：未开启';
+  }
+
+  async function init() {
     if (!window.PddFloatingBall?.init) {
       console.error('[PDD插件] 悬浮球模块不存在');
       return;
+    }
+
+    if (isVideoPage() && window.PddModules?.promotionHistoryIdInjector?.init) {
+      await Promise.resolve(window.PddModules.promotionHistoryIdInjector.init()).catch((error) => {
+        console.error('[PDD插件] 推广ID注入模块初始化失败', error);
+      });
     }
 
     window.PddFloatingBall.init({
