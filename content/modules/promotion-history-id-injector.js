@@ -7,6 +7,7 @@
   const STYLE_ID = 'pdd-promotion-history-id-css';
   const STORAGE_KEY = 'promotionHistoryIdInjector_v1_videoIndex';
   const ENABLED_KEY = 'promotionHistoryIdInjector_v1_enabled';
+  const MARKS_KEY = 'promotionHistoryIdInjector_v1_manualMarks';
   const MAX_CACHE_ITEMS = 1200;
   const OBSERVE_DELAY_MS = 250;
 
@@ -20,9 +21,22 @@
       this.inited = true;
 
       let videoIndex = await loadVideoIndex();
+      let manualMarks = await loadManualMarks();
       let enabled = Boolean(await window.PddStorage?.get?.(ENABLED_KEY, false));
       this.enabled = enabled;
       let scanTimer = null;
+
+      async function updateManualMark(recordKey, field, checked) {
+        const current = manualMarks[recordKey] || {};
+        manualMarks[recordKey] = {
+          duplicate: Boolean(current.duplicate),
+          justPromoted: Boolean(current.justPromoted),
+          [field]: Boolean(checked),
+          updatedAt: Date.now()
+        };
+        await saveManualMarks(manualMarks);
+        scheduleScan();
+      }
 
       function scheduleScan() {
         window.clearTimeout(scanTimer);
@@ -33,7 +47,7 @@
           }
 
           const changed = collectVideoTableIndex(videoIndex);
-          injectHistoryIds(videoIndex);
+          injectHistoryIds(videoIndex, manualMarks, updateManualMark);
           if (changed) {
             videoIndex = trimVideoIndex(videoIndex);
             await saveVideoIndex(videoIndex);
@@ -95,6 +109,24 @@
     }
   }
 
+  async function loadManualMarks() {
+    try {
+      const cached = await window.PddStorage?.get?.(MARKS_KEY, {});
+      return cached && typeof cached === 'object' && !Array.isArray(cached) ? cached : {};
+    } catch (error) {
+      console.warn('[PDD插件] 读取推广标记失败', error);
+      return {};
+    }
+  }
+
+  async function saveManualMarks(marks) {
+    try {
+      await window.PddStorage?.set?.(MARKS_KEY, marks);
+    } catch (error) {
+      console.warn('[PDD插件] 保存推广标记失败', error);
+    }
+  }
+
   async function saveVideoIndex(index) {
     try {
       await window.PddStorage?.set?.(STORAGE_KEY, index);
@@ -144,16 +176,66 @@
     return changed;
   }
 
-  function injectHistoryIds(index) {
-    const items = Array.from(document.querySelectorAll('div[class*="historyPromotion_promotionItem"]'));
-    items.forEach((item) => {
+  function injectHistoryIds(index, manualMarks, onManualMarkChange) {
+    const records = collectHistoryRecords(index);
+    const exactSeen = new Map();
+    const videoSeen = new Map();
+
+    records.forEach((record) => {
+      record.autoDuplicate = exactSeen.has(record.recordKey);
+      exactSeen.set(record.recordKey, (exactSeen.get(record.recordKey) || 0) + 1);
+
+      if (record.videoKey) {
+        record.autoHistorical = videoSeen.has(record.videoKey) && !record.autoDuplicate;
+        videoSeen.set(record.videoKey, (videoSeen.get(record.videoKey) || 0) + 1);
+      }
+    });
+
+    records.forEach((record) => {
+      renderHistoryRecord(record, manualMarks, onManualMarkChange);
+    });
+  }
+
+  function collectHistoryRecords(index) {
+    return Array.from(document.querySelectorAll('div[class*="historyPromotion_promotionItem"]'))
+      .map((item) => {
       const cover = normalizeCoverUrl(item.querySelector('[class*="historyPromotion_promotionImg"] img')?.getAttribute('src'));
-      if (!cover) return;
+      if (!cover) return null;
 
       const info = item.querySelector('div[class*="historyPromotion_promotionInfo"]');
-      if (!info) return;
+      if (!info) return null;
 
       const match = index[cover];
+      const videoId = match?.videoId || '';
+      const goodsId = match?.goodsId || '';
+      const time = extractPromotionTime(item);
+      const metrics = extractPromotionMetrics(item);
+      const status = extractPromotionStatus(item);
+      const videoKey = videoId || cover;
+      const recordKey = [videoKey, time, metrics.estimate, metrics.done, status].join('|');
+
+      return {
+        item,
+        info,
+        cover,
+        videoId,
+        goodsId,
+        time,
+        status,
+        videoKey,
+        recordKey,
+        estimate: metrics.estimate,
+        done: metrics.done
+      };
+    })
+      .filter(Boolean);
+  }
+
+  function renderHistoryRecord(record, manualMarks, onManualMarkChange) {
+      const { item, info, videoId, goodsId, recordKey } = record;
+      const manual = manualMarks[recordKey] || {};
+      const duplicateChecked = record.autoDuplicate || Boolean(manual.duplicate);
+      const justPromotedChecked = record.autoHistorical || Boolean(manual.justPromoted);
       let badge = item.querySelector('.pdd-promotion-history-id-badge');
       if (!badge) {
         badge = document.createElement('div');
@@ -166,22 +248,89 @@
         }
       }
 
-      const nextMatched = match?.videoId ? '1' : '0';
-      const nextText = match?.videoId
-        ? `视频ID: ${match.videoId}${match.goodsId ? ` | 商品ID: ${match.goodsId}` : ''}`
+      const nextMatched = videoId ? '1' : '0';
+      const statusText = getStatusText(record, manual);
+      const nextText = videoId
+        ? `视频ID: ${videoId}${goodsId ? ` | 商品ID: ${goodsId}` : ''}${statusText ? ` | ${statusText}` : ''}`
         : '视频ID: 未匹配';
-      const nextTitle = match?.videoId
+      const nextTitle = videoId
         ? '由短视频流量卡页缓存匹配'
         : '先打开短视频流量卡页加载更多视频后，可提高匹配率';
 
       if (badge.dataset.matched !== nextMatched) badge.dataset.matched = nextMatched;
       if (badge.textContent !== nextText) badge.textContent = nextText;
       if (badge.title !== nextTitle) badge.title = nextTitle;
-    });
+
+      let controls = item.querySelector('.pdd-promotion-history-id-controls');
+      if (!controls) {
+        controls = document.createElement('div');
+        controls.className = 'pdd-promotion-history-id-controls';
+        badge.insertAdjacentElement('afterend', controls);
+      }
+
+      controls.dataset.recordKey = recordKey;
+      renderManualCheckbox(controls, 'duplicate', '重复', duplicateChecked, record.autoDuplicate, recordKey, onManualMarkChange);
+      renderManualCheckbox(controls, 'justPromoted', '刚推过', justPromotedChecked, record.autoHistorical, recordKey, onManualMarkChange);
+  }
+
+  function extractPromotionTime(item) {
+    const text = getText(item.querySelector('[class*="historyPromotion_top"]') || item);
+    const match = text.match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    return match ? match[0] : '';
+  }
+
+  function extractPromotionMetrics(item) {
+    const values = Array.from(item.querySelectorAll('[class*="historyPromotion_dataLabel"]'))
+      .map((el) => getText(el))
+      .filter((text) => /^\d+$/.test(text));
+    return {
+      estimate: values[0] || '',
+      done: values[1] || ''
+    };
+  }
+
+  function extractPromotionStatus(item) {
+    if (item.querySelector('[class*="historyPromotion_end"]')) return '已完成';
+    if (item.querySelector('[class*="historyPromotion_ing"]')) return '投放中';
+    return '';
+  }
+
+  function getStatusText(record, manual) {
+    if (record.autoDuplicate || manual.duplicate) return '重复';
+    if (record.autoHistorical) return '历史已推';
+    if (manual.justPromoted) return '刚推过';
+    return '';
+  }
+
+  function renderManualCheckbox(container, field, label, checked, autoChecked, recordKey, onChange) {
+    let wrapper = container.querySelector(`[data-field="${field}"]`);
+    if (!wrapper) {
+      wrapper = document.createElement('label');
+      wrapper.className = 'pdd-promotion-history-id-check';
+      wrapper.dataset.field = field;
+
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.addEventListener('change', () => {
+        onChange(recordKey, field, input.checked);
+      });
+
+      const text = document.createElement('span');
+      wrapper.appendChild(input);
+      wrapper.appendChild(text);
+      container.appendChild(wrapper);
+    }
+
+    const input = wrapper.querySelector('input');
+    const text = wrapper.querySelector('span');
+    if (input.checked !== checked) input.checked = checked;
+    wrapper.dataset.auto = autoChecked ? '1' : '0';
+    text.textContent = autoChecked ? `${label}(自动)` : label;
   }
 
   function removeInjectedIds() {
     document.querySelectorAll('.pdd-promotion-history-id-badge').forEach((badge) => badge.remove());
+    document.querySelectorAll('.pdd-promotion-history-id-controls').forEach((controls) => controls.remove());
   }
 
   function injectStyle() {
@@ -207,6 +356,32 @@
         border-color: #ddd;
         background: #f7f7f7;
         color: #888;
+      }
+      .pdd-promotion-history-id-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: -2px 0 8px;
+        color: #595959;
+        font-size: 12px;
+        line-height: 18px;
+      }
+      .pdd-promotion-history-id-check {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .pdd-promotion-history-id-check input {
+        width: 13px;
+        height: 13px;
+        margin: 0;
+        accent-color: #2563eb;
+      }
+      .pdd-promotion-history-id-check[data-auto="1"] {
+        color: #d97706;
+        font-weight: 600;
       }
     `);
     style.id = STYLE_ID;

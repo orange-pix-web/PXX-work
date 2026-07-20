@@ -2708,7 +2708,7 @@
             panel.dataset.pddModule = 'video-workbench';
             panel.innerHTML = `
                 <div class="ws-header">
-                    <span id="video-workbench-title">视频工作台 V0.2.9</span>
+                    <span id="video-workbench-title">视频工作台 V0.2.10</span>
                     <div>
                         <span id="video-workbench-close" style="cursor:pointer; font-size: 18px; line-height: 1;">×</span>
                     </div>
